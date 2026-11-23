@@ -44,8 +44,8 @@ os.environ.setdefault("CRON_SECRET", "test-cron-secret")
 
 
 def _normalise(url: str) -> str:
-    return url.replace("postgres://", "postgresql+psycopg://").replace(
-        "postgresql://", "postgresql+psycopg://"
+    return url.replace("postgres://", "postgresql+pg8000://").replace(
+        "postgresql://", "postgresql+pg8000://"
     )
 
 

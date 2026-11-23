@@ -67,7 +67,7 @@ MS_SENDER_EMAIL=you@yourdomain.com
 BOOKING_URL=https://calendly.com/you/30min
 
 # PostgreSQL (single source of truth for pipeline + dashboard)
-DATABASE_URL=postgresql+psycopg://opencrm:your-local-password@localhost:5432/opencrm
+DATABASE_URL=postgresql+pg8000://opencrm:your-local-password@localhost:5432/opencrm
 POSTGRES_DB=opencrm
 POSTGRES_USER=opencrm
 POSTGRES_PASSWORD=your-local-password
@@ -172,7 +172,7 @@ python -m pytest -q
 To use an existing PostgreSQL server instead:
 
 ```bash
-TEST_POSTGRES_ADMIN_URL=postgresql+psycopg://user:password@localhost:5432/postgres \
+TEST_POSTGRES_ADMIN_URL=postgresql+pg8000://user:password@localhost:5432/postgres \
   python -m pytest -q
 ```
 
@@ -302,13 +302,13 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `POLL_INTERVAL_SECONDS` | Lead polling interval | `900` (15 min) |
 | `DATABASE_URL` | PostgreSQL connection string (required) | *(none)* |
 | `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | Local Compose database settings | `opencrm` / `opencrm` / *(required)* |
-| `DB_DRIVER` | SQLAlchemy driver for generic `postgres://` URLs | `postgresql+psycopg` |
+| `DB_DRIVER` | SQLAlchemy driver for generic `postgres://` URLs | `postgresql+pg8000` |
 | `DB_APPLICATION_NAME` | PostgreSQL `application_name` for logs | `opencrm` |
 | `DB_SERVERLESS_MODE` | Use `NullPool` for serverless functions | `false` |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | Long-running connection pool limits | `5` / `5` |
 | `DB_POOL_TIMEOUT` | Seconds to wait for a pooled connection | `30` |
 | `DB_POOL_RECYCLE` | Seconds before recycling a pooled connection | `1800` |
-| `DB_SSLMODE` | PostgreSQL TLS mode (e.g. `require`) | *(empty)* |
+| `DB_SSLMODE` | PostgreSQL TLS mode; pg8000 builds an SSL context for non-empty values other than `disable` | *(empty)* |
 | `DB_ECHO` | Log SQL statements (debug only) | `false` |
 | `DOTENV_OVERRIDE` | Let `.env` override platform-provided variables | `false` |
 | `SQLITE_MIGRATION_SOURCE` | Legacy read-only migration source | `/app/data/leads.db` |

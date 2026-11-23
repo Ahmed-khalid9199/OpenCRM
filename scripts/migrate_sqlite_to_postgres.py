@@ -469,7 +469,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             os.chdir(ROOT)
             command.upgrade(alembic_config, "head")
 
-        engine = create_engine(database_url.replace("postgresql://", "postgresql+psycopg://"))
+        engine = create_engine(database_url.replace("postgresql://", "postgresql+pg8000://"))
         with engine.begin() as target:
             existing = set(inspect(target).get_table_names())
             missing = set(TABLE_ORDER) - existing

@@ -50,7 +50,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-opencrm}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-opencrm}"
+      DATABASE_URL: "postgresql+pg8000://${POSTGRES_USER:-opencrm}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-opencrm}"
       SQLITE_MIGRATION_SOURCE: /app/data/leads.db
       TZ: UTC
     depends_on:
@@ -77,7 +77,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-opencrm}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-opencrm}"
+      DATABASE_URL: "postgresql+pg8000://${POSTGRES_USER:-opencrm}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-opencrm}"
       DB_SERVERLESS_MODE: "false"
       SQLITE_MIGRATION_SOURCE: /app/data/leads.db
       TZ: UTC
@@ -124,7 +124,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-opencrm}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-opencrm}"
+      DATABASE_URL: "postgresql+pg8000://${POSTGRES_USER:-opencrm}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-opencrm}"
       DB_SERVERLESS_MODE: "false"
       SQLITE_MIGRATION_SOURCE: /app/data/leads.db
       DASHBOARD_PORT: 5050

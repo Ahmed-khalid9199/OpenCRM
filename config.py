@@ -195,9 +195,10 @@ class Config:
         """Load database configuration."""
         # DATABASE_URL is the single connection configuration for the
         # consolidated SQLAlchemy data-access layer.  A bare postgres:// URL
-        # is normalised to the psycopg 3 driver inside db.session.
+        # is normalised to the configured driver inside db.session.  pg8000 is
+        # the default because it is pure Python and works on Vercel's runtime.
         self.database_url = os.getenv('DATABASE_URL', '').strip()
-        self.db_driver = os.getenv('DB_DRIVER', 'postgresql+psycopg').strip()
+        self.db_driver = os.getenv('DB_DRIVER', 'postgresql+pg8000').strip()
         self.db_pool_size = self._get_int('DB_POOL_SIZE', 5)
         self.db_max_overflow = self._get_int('DB_MAX_OVERFLOW', 5)
         self.db_pool_timeout = self._get_int('DB_POOL_TIMEOUT', 30)

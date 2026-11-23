@@ -13,12 +13,15 @@ pool sizes configured through ``DB_POOL_SIZE`` / ``DB_MAX_OVERFLOW``.
 
 import os
 import re
+import ssl
 import threading
 from contextlib import contextmanager
 from typing import Iterator, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -32,11 +35,11 @@ SessionLocal = scoped_session(SessionFactory)
 
 
 def normalize_database_url(url: str) -> str:
-    """Normalise common DATABASE_URL spellings to the psycopg 3 driver."""
+    """Normalise common DATABASE_URL spellings to the configured SQLAlchemy driver."""
     if not url or not url.strip():
         raise RuntimeError(
             "DATABASE_URL is not configured. Set it to a PostgreSQL URL, e.g. "
-            "postgresql+psycopg://user:password@host:5432/database"
+            "postgresql+pg8000://user:password@host:5432/database"
         )
     url = url.strip()
     generic_scheme = next(
@@ -46,18 +49,37 @@ def normalize_database_url(url: str) -> str:
     if generic_scheme is None:
         return url
 
-    driver = os.getenv("DB_DRIVER", "postgresql+psycopg").strip() or "postgresql+psycopg"
+    driver = os.getenv("DB_DRIVER", "postgresql+pg8000").strip() or "postgresql+pg8000"
     if not driver.startswith("postgresql+"):
         raise RuntimeError(
             "DB_DRIVER must be a SQLAlchemy PostgreSQL driver such as "
-            "postgresql+psycopg or postgresql+psycopg2"
+            "postgresql+pg8000 or postgresql+psycopg"
         )
-    return f"{driver}://{url[len(generic_scheme):]}"
+    normalised = f"{driver}://{url[len(generic_scheme):]}"
+    return _drop_libpq_only_options(normalised, driver)
+
+
+def _drop_libpq_only_options(url: str, driver: str) -> str:
+    """Remove libpq-only URL query options that pg8000 cannot accept."""
+    if driver != "postgresql+pg8000":
+        return url
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    libpq_only = {"sslmode", "channel_binding"}
+    kept = [(key, value) for key, value in pairs if key.lower() not in libpq_only]
+    if len(kept) == len(pairs):
+        return url
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment)
+    )
 
 
 def get_database_url() -> str:
     """Return the normalised DATABASE_URL from the environment."""
-    return normalize_database_url(os.getenv("DATABASE_URL", ""))
+    url = normalize_database_url(os.getenv("DATABASE_URL", ""))
+    return _drop_libpq_only_options(url, "postgresql+pg8000")
 
 
 def mask_database_url(url: str) -> str:
@@ -96,6 +118,25 @@ def _get_int(name: str, default: int) -> int:
         return default
 
 
+def _register_pg8000_error_mapping(engine: Engine) -> None:
+    """Map pg8000 SQLSTATE 23xxx failures to SQLAlchemy IntegrityError.
+
+    pg8000 reports constraint violations as ``ProgrammingError`` even though
+    the SQLSTATE identifies them as integrity errors.  The application's
+    repository code relies on SQLAlchemy's ``IntegrityError`` for duplicate
+    leads and foreign-key failures, so translate at the engine boundary.
+    """
+
+    @event.listens_for(engine, "handle_error")
+    def _map_integrity_errors(context) -> None:
+        original = context.original_exception
+        args = getattr(original, "args", None)
+        details = args[0] if args else None
+        sqlstate = details.get("C") if isinstance(details, dict) else None
+        if isinstance(sqlstate, str) and sqlstate.startswith("23"):
+            raise IntegrityError(context.statement, context.parameters, original) from original
+
+
 def _make_engine(url: str) -> Engine:
     options = {
         "pool_pre_ping": True,
@@ -115,18 +156,27 @@ def _make_engine(url: str) -> Engine:
             }
         )
 
-    sslmode = os.getenv("DB_SSLMODE", "").strip()
+    sslmode = os.getenv("DB_SSLMODE", "").strip().lower()
     connect_args = {}
-    if sslmode:
+    if "pg8000" in url:
+        # pg8000 does not understand libpq's sslmode query parameter. Build an
+        # SSL context instead; DB_SSLMODE is still the single config switch.
+        if sslmode and sslmode != "disable":
+            connect_args["ssl_context"] = ssl.create_default_context()
+    elif sslmode:
         connect_args["sslmode"] = sslmode
-    if connect_args:
-        options["connect_args"] = connect_args
 
     application_name = os.getenv("DB_APPLICATION_NAME", "opencrm").strip()
     if application_name:
-        options["connect_args"] = {**options.get("connect_args", {}), "application_name": application_name}
+        connect_args["application_name"] = application_name
 
-    return create_engine(url, **options)
+    if connect_args:
+        options["connect_args"] = connect_args
+
+    engine = create_engine(url, **options)
+    if "pg8000" in url:
+        _register_pg8000_error_mapping(engine)
+    return engine
 
 
 def get_engine() -> Engine:

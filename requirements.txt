@@ -57,9 +57,9 @@ SQLAlchemy==2.0.58
 # Alembic: schema migrations for PostgreSQL
 alembic==1.14.1
 
-# psycopg 3: PostgreSQL driver (binary wheels include libpq)
-# 3.3.9 ships cp314 wheels; older 3.2.x does not.
-psycopg[binary]==3.3.9
+# pg8000: pure-Python PostgreSQL driver for SQLAlchemy.
+# Avoids native libpq/wheel ABI problems on Vercel's Python 3.14 runtime.
+pg8000==1.31.6
 
 # Scheduling and Automation
 # --------------------------

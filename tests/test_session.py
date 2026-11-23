@@ -23,10 +23,21 @@ def test_serverless_mode_uses_null_pool(pg_database: str, monkeypatch) -> None:
 
 
 def test_generic_postgres_url_uses_configured_driver(monkeypatch) -> None:
-    monkeypatch.setenv("DB_DRIVER", "postgresql+psycopg")
+    monkeypatch.setenv("DB_DRIVER", "postgresql+pg8000")
     assert (
         normalize_database_url("postgres://user:password@localhost:5432/opencrm")
-        == "postgresql+psycopg://user:password@localhost:5432/opencrm"
+        == "postgresql+pg8000://user:password@localhost:5432/opencrm"
+    )
+
+
+def test_pg8000_url_drops_libpq_only_query_options(monkeypatch) -> None:
+    monkeypatch.setenv("DB_DRIVER", "postgresql+pg8000")
+    assert (
+        normalize_database_url(
+            "postgresql://user:password@localhost:5432/opencrm"
+            "?sslmode=require&channel_binding=require&application_name=opencrm"
+        )
+        == "postgresql+pg8000://user:password@localhost:5432/opencrm?application_name=opencrm"
     )
 
 
