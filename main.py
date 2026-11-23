@@ -104,7 +104,9 @@ def startup_validation() -> bool:
             return False
         
         logger.info(f"✓ Configuration loaded (Environment: {config.environment})")
-        logger.info(f"✓ Database path: {config.db_path}")
+        from db.session import get_database_url, mask_database_url
+
+        logger.info(f"✓ Database URL: {mask_database_url(get_database_url())}")
         logger.info(f"✓ Poll interval: {config.poll_interval_seconds}s ({config.poll_interval_seconds/60:.1f} min)")
         logger.info(f"✓ Log level: {config.log_level}")
         
@@ -375,11 +377,11 @@ def main():
         logger.error(f"Startup validation error: {e}", exc_info=True)
         sys.exit(1)
     
-    # Initialize database (schema creation happens automatically)
+    # Verify database connectivity. Schema is managed by Alembic, not by startup.
     try:
-        logger.info("Initializing database...")
+        logger.info("Verifying database connection...")
         db = get_database()
-        logger.info(f"✓ Database initialized: {db.db_path}")
+        logger.info(f"✓ Database connected: {db.db_path}")
         
     except DatabaseError as e:
         logger.error(f"Database initialization failed: {e}")

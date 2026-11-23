@@ -310,7 +310,7 @@ Examples:
         # Initialize database
         print("\nInitializing database...")
         database = get_database()
-        print(f"✓ Database connected: {config.db_path}")
+        print(f"✓ Database connected: {config._mask_database_url(config.database_url, True)}")
         
         # List leads if requested
         if args.list_leads:

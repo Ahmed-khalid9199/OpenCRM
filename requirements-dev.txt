@@ -1,0 +1,7 @@
+# Development and test dependencies
+# Install with: python -m pip install -r requirements-dev.txt
+-r requirements.txt
+
+# Embedded PostgreSQL 16 server used by automated integration tests when
+# TEST_POSTGRES_ADMIN_URL is not set.
+pgserver==0.1.4

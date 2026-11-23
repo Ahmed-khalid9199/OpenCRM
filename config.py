@@ -18,16 +18,16 @@ Usage:
     
     # Access configuration values
     meta_token = config.meta_page_access_token
-    db_path = config.db_path
+    database_url = config.database_url
     
 Built by Arkitekt AI — https://arkitekt-ai.com
 Version: 1.0.0
 """
 
 import os
+import re
 import sys
 from typing import Optional, List
-from pathlib import Path
 from dotenv import load_dotenv
 
 
@@ -102,23 +102,27 @@ class Config:
     def _load_env_file(self) -> None:
         """
         Load environment variables from .env file.
-        
+
         Searches for .env file in current directory and parent directories.
+        Set DOTENV_OVERRIDE=false to let platform-provided environment variables
+        take precedence (recommended for Vercel and automated tests).
         """
+        override = self._get_bool('DOTENV_OVERRIDE', True)
+
         # Try to find .env file
         current_dir = Path.cwd()
         env_file = current_dir / '.env'
         
         # Check if .env exists in current directory
         if env_file.exists():
-            load_dotenv(env_file, override=True)
-            print(f"[CONFIG] Loaded environment from: {env_file}")
+            load_dotenv(env_file, override=override)
+            print(f"[CONFIG] Loaded environment from: {env_file} (override={override})")
         else:
             # Try parent directory (useful for different execution contexts)
             parent_env = current_dir.parent / '.env'
             if parent_env.exists():
-                load_dotenv(parent_env, override=True)
-                print(f"[CONFIG] Loaded environment from: {parent_env}")
+                load_dotenv(parent_env, override=override)
+                print(f"[CONFIG] Loaded environment from: {parent_env} (override={override})")
             else:
                 print("[CONFIG] No .env file found, using system environment variables")
     
@@ -189,14 +193,29 @@ class Config:
     
     def _load_database_config(self) -> None:
         """Load database configuration."""
+        # DATABASE_URL is the single connection configuration for the
+        # consolidated SQLAlchemy data-access layer.  A bare postgres:// URL
+        # is normalised to the psycopg 3 driver inside db.session.
+        self.database_url = os.getenv('DATABASE_URL', '').strip()
+        self.db_driver = os.getenv('DB_DRIVER', 'postgresql+psycopg').strip()
+        self.db_pool_size = self._get_int('DB_POOL_SIZE', 5)
+        self.db_max_overflow = self._get_int('DB_MAX_OVERFLOW', 5)
+        self.db_pool_timeout = self._get_int('DB_POOL_TIMEOUT', 30)
+        self.db_pool_recycle = self._get_int('DB_POOL_RECYCLE', 1800)
+        self.db_serverless_mode = self._get_bool('DB_SERVERLESS_MODE', False)
+        self.db_sslmode = os.getenv('DB_SSLMODE', '').strip()
+        self.db_echo = self._get_bool('DB_ECHO', False)
+
+        # Legacy SQLite path is retained only as the read-only migration source
+        # and for rollback/verification.  It is not used by the running app
+        # when DATABASE_URL is configured.
         self.db_path = os.getenv('DB_PATH', '/app/data/leads.db').strip()
+        self.sqlite_migration_source = os.getenv(
+            'SQLITE_MIGRATION_SOURCE', self.db_path
+        ).strip()
         self.db_backup_enabled = self._get_bool('DB_BACKUP_ENABLED', True)
         self.db_backup_interval_hours = self._get_int('DB_BACKUP_INTERVAL_HOURS', 24)
-        
-        # Ensure database directory exists
-        db_dir = Path(self.db_path).parent
-        db_dir.mkdir(parents=True, exist_ok=True)
-    
+
     def _load_logging_config(self) -> None:
         """Load logging configuration."""
         self.log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
@@ -215,9 +234,8 @@ class Config:
             print(f"[CONFIG] Warning: Invalid LOG_LEVEL '{self.log_level}'. Using 'INFO'.")
             self.log_level = 'INFO'
         
-        # Ensure log directory exists
-        log_dir = Path(self.log_file_path).parent
-        log_dir.mkdir(parents=True, exist_ok=True)
+        # Logging setup must not write to disk at import time: Vercel functions
+        # and other serverless runtimes have a read-only filesystem except /tmp.
     
     def _load_error_handling_config(self) -> None:
         """Load error handling and retry configuration."""
@@ -305,6 +323,10 @@ class Config:
             ConfigurationError: If required configuration is missing.
         """
         errors = []
+
+        # Check database configuration
+        if not self.database_url:
+            errors.append("DATABASE_URL is required (PostgreSQL connection string)")
 
         # Check Meta API credentials
         if not self.meta_page_id or self.meta_page_id == 'YOUR_META_PAGE_ID_HERE':
@@ -414,7 +436,7 @@ class Config:
             f"Config(environment={self.environment}, "
             f"meta_api_version={self.meta_api_version}, "
             f"poll_interval={self.poll_interval_seconds}s, "
-            f"db_path={self.db_path}, "
+            f"database_url={self._mask_database_url(self.database_url, True)}, "
             f"log_level={self.log_level})"
         )
     
@@ -453,7 +475,11 @@ class Config:
         print(f"  Booking URL:        {self.booking_url}")
         
         print("\n[Database]")
-        print(f"  Database Path:      {self.db_path}")
+        print(f"  Database URL:       {self._mask_database_url(self.database_url, hide_secrets)}")
+        print(f"  Serverless Mode:    {self.db_serverless_mode}")
+        print(f"  Pool Size:          {self.db_pool_size}")
+        print(f"  Max Overflow:       {self.db_max_overflow}")
+        print(f"  SQLite Source:      {self.sqlite_migration_source}")
         print(f"  Backup Enabled:     {self.db_backup_enabled}")
         print(f"  Backup Interval:    {self.db_backup_interval_hours}h")
         
@@ -476,6 +502,18 @@ class Config:
         
         print("\n" + "=" * 80 + "\n")
     
+    @staticmethod
+    def _mask_database_url(value: str, hide: bool) -> str:
+        """Mask credentials in a SQLAlchemy database URL for safe display."""
+        if not value:
+            return '<not configured>'
+        if not hide:
+            return value
+        match = re.search(r'://([^@/]+)@', value)
+        if not match:
+            return value
+        return value[:match.start(1)] + '***:***' + value[match.end(1):]
+
     @staticmethod
     def _mask(value: str, hide: bool, show_chars: int = 4) -> str:
         """

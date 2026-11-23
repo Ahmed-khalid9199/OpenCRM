@@ -95,6 +95,11 @@ WORKDIR ${APP_HOME}
 COPY --chown=appuser:appuser *.py ./
 COPY --chown=appuser:appuser scripts/ ./scripts/
 
+# Consolidated SQLAlchemy data layer and Alembic schema migrations
+COPY --chown=appuser:appuser db/ ./db/
+COPY --chown=appuser:appuser migrations/ ./migrations/
+COPY --chown=appuser:appuser alembic.ini ./
+
 # Copy example configuration (will be overridden by volume mounts or env vars)
 COPY --chown=appuser:appuser ./.env.example ./.env.example
 

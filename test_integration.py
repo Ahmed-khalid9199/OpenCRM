@@ -12,7 +12,7 @@ Features:
 - Microsoft Graph API authentication tests
 - Email template generation validation
 - Health check endpoint testing
-- Test database setup and teardown
+- Live PostgreSQL CRUD check with test-lead cleanup
 - Detailed pass/fail reporting
 
 Usage:
@@ -20,7 +20,7 @@ Usage:
     python test_integration.py
     
     # Run in Docker
-    docker-compose run lead-pipeline python test_integration.py
+    docker compose run --rm lead-pipeline python test_integration.py
     
     # Run with verbose output
     python test_integration.py --verbose
@@ -30,12 +30,10 @@ Version: 1.0.0
 """
 
 import sys
-import os
 import logging
 import argparse
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List, Any, Tuple
 
 # Import application modules
@@ -179,21 +177,20 @@ def test_database() -> bool:
     print_header("DATABASE TESTS")
     
     all_passed = True
-    test_db_path = "data/test_leads.db"
     test_lead_id = f"test_integration_{int(time.time())}"
-    
-    # Cleanup old test database if exists
-    if os.path.exists(test_db_path):
-        os.remove(test_db_path)
-    
     db = None
     
     try:
-        # Test 1: Database initialization
+        # Test 1: Database initialization. This is a live check against the
+        # configured PostgreSQL database; any inserted test lead is removed
+        # in the finally block below.
         try:
-            db = Database(db_path=test_db_path)
-            print_test_result("Database Initialization", True, 
-                            f"Database created at {test_db_path}")
+            db = Database()
+            print_test_result(
+                "Database Initialization",
+                True,
+                f"Connected to {config._mask_database_url(config.database_url, True)}",
+            )
         except Exception as e:
             print_test_result("Database Initialization", False, f"Error: {e}")
             all_passed = False
@@ -290,16 +287,15 @@ def test_database() -> bool:
             all_passed = False
         
     finally:
-        # Cleanup: Close database and remove test file
+        # Remove only the lead created by this manual test; never drop the database.
         if db:
-            db.close()
-        
-        if os.path.exists(test_db_path):
             try:
-                os.remove(test_db_path)
-                print("\nTest database cleaned up")
-            except:
-                print("\nWarning: Could not clean up test database")
+                db.delete_lead(test_lead_id)
+                print("\nTest lead cleaned up")
+            except Exception as exc:  # noqa: BLE001 - best-effort manual cleanup
+                print(f"\nWarning: Could not clean up test lead: {exc}")
+            finally:
+                db.close()
     
     return all_passed
 

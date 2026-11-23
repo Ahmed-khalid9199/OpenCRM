@@ -320,7 +320,7 @@ class EmailClient:
 
         # In dry_run or mock mode, log instead of sending
         if self.dry_run or self.mock_api_enabled:
-            logger.info(f"[{'DRY RUN' if self.dry_run else 'MOCK'}] Would send email to {', '.join(recipients)}: '{subject}'")
+            logger.info("[%s] Would send email to %d recipient(s)", 'DRY RUN' if self.dry_run else 'MOCK', len(recipients))
             return True
 
         # Validate body type
@@ -377,7 +377,7 @@ class EmailClient:
             message['message']['bccRecipients'] = bcc_list
         
         try:
-            logger.info(f"Sending email to {len(recipients)} recipient(s): {', '.join(recipients[:3])}...")
+            logger.info("Sending email to %d recipient(s)", len(recipients))
 
             # Two-step: create draft then send — routes through mailbox send
             # infrastructure rather than the /sendMail direct endpoint
@@ -390,12 +390,12 @@ class EmailClient:
             if draft and draft.get('id'):
                 send_endpoint = f"users/{self.sender_email}/messages/{draft['id']}/send"
                 self._make_request('POST', send_endpoint)
-                logger.info(f"Email sent successfully (via draft): '{subject}' to {', '.join(recipients)}")
+                logger.info("Email sent successfully via draft to %d recipient(s)", len(recipients))
             else:
                 # Fallback to direct sendMail
                 endpoint = f"users/{self.sender_email}/sendMail"
                 self._make_request('POST', endpoint, data=message)
-                logger.info(f"Email sent successfully (direct): '{subject}' to {', '.join(recipients)}")
+                logger.info("Email sent successfully directly to %d recipient(s)", len(recipients))
 
             return True
 
@@ -432,7 +432,7 @@ class EmailClient:
             all_recipients.extend(bcc_recipients)
 
         try:
-            logger.info(f"[SMTP] Sending email to {', '.join(recipients[:3])}...")
+            logger.info("[SMTP] Sending email to %d recipient(s)", len(recipients))
             with smtplib.SMTP('smtp.office365.com', 587, timeout=self.timeout) as server:
                 server.ehlo()
                 server.starttls()
@@ -456,7 +456,7 @@ class EmailClient:
                         raise EmailError(f"XOAUTH2 auth failed: {code} {resp}")
 
                 server.sendmail(self.sender_email, all_recipients, msg.as_string())
-            logger.info(f"[SMTP] Email sent successfully: '{subject}' to {', '.join(recipients)}")
+            logger.info("[SMTP] Email sent successfully to %d recipient(s)", len(recipients))
             return True
         except EmailError:
             raise

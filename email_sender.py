@@ -324,7 +324,7 @@ class EmailSender:
             recipients = [email]
 
             # Send email
-            logger.info(f"Sending email for lead {lead_id} to {', '.join(recipients)}")
+            logger.info("Sending email for lead %s", lead_id)
             
             success = self.email_client.send_email(
                 recipients=recipients,

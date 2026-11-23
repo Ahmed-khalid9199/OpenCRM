@@ -6,6 +6,11 @@ __pycache__/
 data/
 logs/
 
+# Local test/tool state
+.test-pgdata/
+.pytest_cache/
+.venv/
+
 # Environment
 .env
 *.env

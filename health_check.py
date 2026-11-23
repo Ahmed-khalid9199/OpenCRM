@@ -39,6 +39,7 @@ import socket
 
 from database import get_database, DatabaseError
 from config import config
+from db.session import get_database_url, mask_database_url
 
 
 # Configure module logger
@@ -176,8 +177,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             return {
                 'healthy': True,
                 'status': 'connected',
-                'message': f'Database operational (leads: {count})',
-                'database_path': config.db_path
+                'message': f'Database operational (leads: {count})'
             }
             
         except DatabaseError as e:
@@ -185,8 +185,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             return {
                 'healthy': False,
                 'status': 'error',
-                'message': f'Database error: {str(e)}',
-                'database_path': config.db_path
+                'message': f'Database error: {str(e)}'
             }
             
         except Exception as e:
@@ -194,8 +193,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             return {
                 'healthy': False,
                 'status': 'error',
-                'message': f'Unexpected error: {str(e)}',
-                'database_path': config.db_path
+                'message': f'Unexpected error: {str(e)}'
             }
     
     def _check_configuration(self) -> Dict[str, Any]:
@@ -287,7 +285,7 @@ def start_health_check_server() -> Optional[threading.Thread]:
     
     try:
         # Create server
-        server_address = ('', port)
+        server_address = ('127.0.0.1', port)
         _server_instance = HTTPServer(server_address, HealthCheckHandler)
         
         # Start server in background thread

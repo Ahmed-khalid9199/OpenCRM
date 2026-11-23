@@ -8,11 +8,13 @@ Usage:
     python dashboard.py
 
 Environment variables:
-    DB_PATH              - Path to SQLite database (default: data/leads.db)
+    DATABASE_URL         - PostgreSQL connection string (required)
     DASHBOARD_PORT       - Port to run dashboard on (default: 5050)
     DASHBOARD_USERNAME   - Login username (default: admin)
-    DASHBOARD_PASSWORD   - Login password (required for production)
-    DASHBOARD_SECRET_KEY - Flask session secret (generated if not set)
+    DASHBOARD_PASSWORD   - Login password (required; no default)
+    DASHBOARD_SECRET_KEY - Flask session secret (required)
+    CRON_SECRET          - Bearer token for /api/cron/* (required on Vercel)
+    SESSION_COOKIE_SECURE - Set to false only for local HTTP testing
 """
 
 import hashlib
@@ -21,12 +23,20 @@ import logging
 import os
 import re
 import secrets
-import sqlite3
 import uuid
 from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import Flask, jsonify, request, Response, session, redirect, url_for
+
+from db.repository import DatabaseError, SQLAlchemyConnection
+from db.session import (
+    dispose_engine,
+    get_database_url,
+    mask_database_url,
+    redact_credentials,
+    remove_session,
+)
 
 
 def _hash_password(password: str) -> str:
@@ -39,7 +49,7 @@ def _hash_password(password: str) -> str:
 def _check_password(password: str, stored: str) -> bool:
     """Verify a password against a stored salt$hash."""
     if '$' not in stored:
-        return password == stored  # legacy plain-text fallback
+        return False
     salt, h = stored.split('$', 1)
     return hashlib.sha256((salt + password).encode()).hexdigest() == h
 
@@ -48,19 +58,36 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-DB_PATH = os.getenv('DB_PATH', os.path.join(os.path.dirname(__file__), 'data', 'leads.db'))
 DASHBOARD_PORT = int(os.getenv('DASHBOARD_PORT', '5050'))
 
-DASHBOARD_USERNAME = os.getenv('DASHBOARD_USERNAME', 'admin')
-DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', 'admin')
+DASHBOARD_USERNAME = os.getenv('DASHBOARD_USERNAME', 'admin').strip()
+DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', '').strip()
 WEBHOOK_API_KEY = os.getenv('WEBHOOK_API_KEY', '').strip()
+CRON_SECRET = os.getenv('CRON_SECRET', '').strip()
 
 # Mailgun config (optional — for campaign sends)
 MAILGUN_API_KEY = os.getenv('MAILGUN_API_KEY', '').strip()
 MAILGUN_DOMAIN = os.getenv('MAILGUN_DOMAIN', '').strip()
 MAILGUN_SENDER_EMAIL = os.getenv('MAILGUN_SENDER_EMAIL', '').strip()
 MAILGUN_REGION = os.getenv('MAILGUN_REGION', 'us').strip().lower()
-app.secret_key = os.getenv('DASHBOARD_SECRET_KEY', secrets.token_hex(32))
+
+_secret_key = os.getenv('DASHBOARD_SECRET_KEY', '').strip()
+if not _secret_key:
+    raise RuntimeError("DASHBOARD_SECRET_KEY must be set to a persistent random value")
+if not DASHBOARD_PASSWORD or DASHBOARD_PASSWORD.lower() in {
+    'admin', 'password', 'changeme', 'secret', 'test', 'testpassword'
+}:
+    raise RuntimeError(
+        "DASHBOARD_PASSWORD must be set to a strong value; default/placeholder passwords are refused"
+    )
+app.secret_key = _secret_key
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=os.getenv('SESSION_COOKIE_SECURE', 'true').strip().lower()
+    in ('1', 'true', 'yes', 'on'),
+    PREFERRED_URL_SCHEME='https',
+)
 
 # Whitelist of columns that may be used for sorting (prevents SQL injection)
 ALLOWED_SORT_COLUMNS = {
@@ -108,122 +135,59 @@ logger = logging.getLogger(__name__)
 # Database helpers
 # ---------------------------------------------------------------------------
 
-_migrated = False
+_bootstrapped = False
 
-def _run_migrations(conn: sqlite3.Connection) -> None:
-    """Run schema migrations."""
-    global _migrated
-    if _migrated:
+
+def _new_connection() -> SQLAlchemyConnection:
+    """Return a connection from the shared SQLAlchemy session layer."""
+    return SQLAlchemyConnection()
+
+
+def _ensure_bootstrap_admin() -> None:
+    """Create the initial admin user once, preserving legacy behaviour."""
+    global _bootstrapped
+    if _bootstrapped:
         return
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(leads)").fetchall()}
-    if 'tags' not in existing:
-        conn.execute("ALTER TABLE leads ADD COLUMN tags TEXT DEFAULT '{}'")
-    if 'lead_source' not in existing:
-        conn.execute("ALTER TABLE leads ADD COLUMN lead_source TEXT DEFAULT 'meta'")
-    if 'assigned_to' not in existing:
-        conn.execute("ALTER TABLE leads ADD COLUMN assigned_to TEXT DEFAULT ''")
-    if 'follow_up_date' not in existing:
-        conn.execute("ALTER TABLE leads ADD COLUMN follow_up_date TEXT DEFAULT NULL")
-    if 'deal_value' not in existing:
-        conn.execute("ALTER TABLE leads ADD COLUMN deal_value REAL DEFAULT NULL")
-    if 'expected_close_date' not in existing:
-        conn.execute("ALTER TABLE leads ADD COLUMN expected_close_date TEXT DEFAULT NULL")
 
-    # Users table
-    conn.execute("""CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        display_name TEXT NOT NULL DEFAULT '',
-        role TEXT NOT NULL DEFAULT 'user',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
+    conn = _new_connection()
+    try:
+        if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+            conn.execute(
+                "INSERT INTO users (username, password, display_name, role) "
+                "VALUES (?, ?, ?, ?)",
+                (DASHBOARD_USERNAME, _hash_password(DASHBOARD_PASSWORD), 'Admin', 'admin'),
+            )
+            conn.commit()
+            logger.info("Created bootstrap admin user: %s", DASHBOARD_USERNAME)
+        _bootstrapped = True
+    except DatabaseError as exc:
+        logger.error("Failed to bootstrap admin user: %s", exc)
+    finally:
+        conn.close()
 
-    # Lead notes table
-    conn.execute("""CREATE TABLE IF NOT EXISTS lead_notes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        lead_id TEXT NOT NULL,
-        author TEXT NOT NULL DEFAULT '',
-        content TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (lead_id) REFERENCES leads(lead_id) ON DELETE CASCADE
-    )""")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_notes_lead_id ON lead_notes(lead_id)")
 
-    # Email sequences
-    conn.execute("""CREATE TABLE IF NOT EXISTS sequences (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        steps TEXT NOT NULL DEFAULT '[]',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
+def get_db() -> SQLAlchemyConnection:
+    """Return a database connection backed by the consolidated SQLAlchemy layer.
 
-    conn.execute("""CREATE TABLE IF NOT EXISTS sequence_enrollments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        lead_id TEXT NOT NULL,
-        sequence_id INTEGER NOT NULL,
-        current_step INTEGER NOT NULL DEFAULT 0,
-        status TEXT NOT NULL DEFAULT 'active',
-        next_send_at TEXT,
-        enrolled_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (lead_id) REFERENCES leads(lead_id) ON DELETE CASCADE,
-        FOREIGN KEY (sequence_id) REFERENCES sequences(id) ON DELETE CASCADE
-    )""")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_enrollments_lead ON sequence_enrollments(lead_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_enrollments_next_send ON sequence_enrollments(status, next_send_at)")
+    Schema changes are owned exclusively by Alembic; this function no longer
+    creates or migrates tables.
+    """
+    _ensure_bootstrap_admin()
+    return _new_connection()
 
-    # Campaigns
-    conn.execute("""CREATE TABLE IF NOT EXISTS campaigns (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        campaign_type TEXT NOT NULL DEFAULT 'single',
-        email_provider TEXT NOT NULL DEFAULT 'outlook',
-        subject_template TEXT NOT NULL DEFAULT '',
-        body_template TEXT NOT NULL DEFAULT '',
-        lead_filters TEXT NOT NULL DEFAULT '{}',
-        status TEXT NOT NULL DEFAULT 'draft',
-        total_recipients INTEGER NOT NULL DEFAULT 0,
-        sent_count INTEGER NOT NULL DEFAULT 0,
-        failed_count INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        sent_at TEXT
-    )""")
 
-    conn.execute("""CREATE TABLE IF NOT EXISTS campaign_sends (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        campaign_id INTEGER NOT NULL,
-        lead_id TEXT NOT NULL,
-        email TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        sent_at TEXT,
-        error TEXT,
-        FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
-        FOREIGN KEY (lead_id) REFERENCES leads(lead_id) ON DELETE CASCADE
-    )""")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_campaign_sends_campaign ON campaign_sends(campaign_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_campaign_sends_status ON campaign_sends(campaign_id, status)")
+@app.teardown_appcontext
+def _remove_session(exception=None) -> None:
+    """Release the scoped SQLAlchemy session after each Flask request."""
+    remove_session()
 
-    # Bootstrap admin from env if users table is empty
-    cur = conn.execute("SELECT COUNT(*) FROM users")
-    if cur.fetchone()[0] == 0:
-        conn.execute(
-            "INSERT INTO users (username, password, display_name, role) VALUES (?, ?, ?, ?)",
-            (DASHBOARD_USERNAME, _hash_password(DASHBOARD_PASSWORD), 'Admin', 'admin'),
-        )
 
-    conn.commit()
-    _migrated = True
-
-def get_db() -> sqlite3.Connection:
-    """Open a read-write connection to the leads database."""
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.row_factory = sqlite3.Row
-    _run_migrations(conn)
-    return conn
+def dispose_dashboard_engine() -> None:
+    """Dispose the shared engine. Intended for tests and graceful shutdown."""
+    global _bootstrapped
+    _bootstrapped = False
+    remove_session()
+    dispose_engine()
 
 
 # ---------------------------------------------------------------------------
@@ -783,8 +747,8 @@ def api_generate_email(lead_id: str):
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
-        logger.error(f"AI email generation failed: {e}")
-        return jsonify({'error': f'AI generation failed: {str(e)}'}), 500
+        logger.error("AI email generation failed for lead %s: %s", lead_id, redact_credentials(e))
+        return jsonify({'error': 'AI generation failed'}), 500
 
 
 @app.route('/api/lead/<lead_id>/send-email', methods=['POST'])
@@ -824,8 +788,8 @@ def api_send_email(lead_id: str):
             body_type='html',
         )
     except Exception as e:
-        logger.error(f"Failed to send email to {recipient}: {e}")
-        return jsonify({'error': f'Email send failed: {str(e)}'}), 500
+        logger.error("Failed to send email for lead %s: %s", lead_id, redact_credentials(e))
+        return jsonify({'error': 'Email send failed'}), 500
 
     if not success:
         return jsonify({'error': 'Email send returned failure'}), 500
@@ -1301,31 +1265,28 @@ def api_lead_enrollments(lead_id: str):
         conn.close()
 
 
-@app.route('/api/sequences/process', methods=['POST'])
-@login_required
-def api_process_sequences():
-    """Process due sequence steps: send emails and advance enrollments.
-
-    Call this endpoint periodically (via cron, the main pipeline loop, or manually)
-    to send due sequence emails and advance leads to the next step.
-    """
+def _process_sequences(limit=None) -> dict:
+    """Process due sequence steps, optionally bounded for serverless cron runs."""
     now = datetime.utcnow().isoformat()
     conn = get_db()
     sent = 0
     completed = 0
     errors = []
 
-    try:
-        # Find due enrollments
-        rows = conn.execute(
-            """SELECT se.id, se.lead_id, se.sequence_id, se.current_step,
+    query = """SELECT se.id, se.lead_id, se.sequence_id, se.current_step,
                       s.steps, l.email, l.first_name, l.full_name
                FROM sequence_enrollments se
                JOIN sequences s ON s.id = se.sequence_id
                JOIN leads l ON l.lead_id = se.lead_id
-               WHERE se.status = 'active' AND se.next_send_at <= ?""",
-            (now,),
-        ).fetchall()
+               WHERE se.status = 'active' AND se.next_send_at <= ?
+               ORDER BY se.next_send_at, se.id"""
+    params = [now]
+    if limit:
+        query += " LIMIT ?"
+        params.append(int(limit))
+
+    try:
+        rows = conn.execute(query, tuple(params)).fetchall()
 
         for row in rows:
             enrollment_id = row['id']
@@ -1365,7 +1326,7 @@ def api_process_sequences():
                     body_type='html',
                 )
             except Exception as e:
-                errors.append({'enrollment_id': enrollment_id, 'error': str(e)})
+                errors.append({'enrollment_id': enrollment_id, 'error': redact_credentials(e)})
                 continue
 
             if success:
@@ -1391,7 +1352,14 @@ def api_process_sequences():
     finally:
         conn.close()
 
-    return jsonify({'sent': sent, 'completed': completed, 'errors': errors})
+    return {'sent': sent, 'completed': completed, 'errors': errors}
+
+
+@app.route('/api/sequences/process', methods=['POST'])
+@login_required
+def api_process_sequences():
+    """Process due sequence steps manually from the dashboard."""
+    return jsonify(_process_sequences())
 
 
 # ---------------------------------------------------------------------------
@@ -1402,9 +1370,9 @@ def api_process_sequences():
 def api_webhook_leads():
     """Ingest leads from external sources via webhook.
 
-    Authenticated via ``Authorization: Bearer <WEBHOOK_API_KEY>`` header
-    or ``?api_key=<KEY>`` query param.  If WEBHOOK_API_KEY is not configured
-    the endpoint is disabled.
+    Authenticated via the ``Authorization: Bearer <WEBHOOK_API_KEY>`` header
+    only. Query-string keys are not accepted. If WEBHOOK_API_KEY is not
+    configured the endpoint is disabled.
 
     Accepts a single lead object or a list of lead objects.  Minimum required
     field: ``email``.  Optional: first_name, last_name, full_name,
@@ -1414,14 +1382,12 @@ def api_webhook_leads():
     if not WEBHOOK_API_KEY:
         return jsonify({'error': 'Webhook endpoint is not configured. Set WEBHOOK_API_KEY.'}), 403
 
-    # Auth check
+    # Auth check — header only; never accept secrets in URLs.
     provided_key = ''
     auth_header = request.headers.get('Authorization', '')
     if auth_header.startswith('Bearer '):
         provided_key = auth_header[7:].strip()
-    if not provided_key:
-        provided_key = request.args.get('api_key', '').strip()
-    if provided_key != WEBHOOK_API_KEY:
+    if not provided_key or provided_key != WEBHOOK_API_KEY:
         return jsonify({'error': 'Invalid API key'}), 401
 
     payload = request.get_json(silent=True)
@@ -1884,6 +1850,201 @@ def api_email_providers():
     else:
         providers.append({'id': 'mailgun', 'name': 'Mailgun (not configured)', 'configured': False})
     return jsonify({'providers': providers})
+
+
+# ---------------------------------------------------------------------------
+# Serverless health and cron endpoints
+# ---------------------------------------------------------------------------
+
+def _require_cron_auth():
+    """Vercel Cron sends Authorization: Bearer $CRON_SECRET automatically."""
+    if not CRON_SECRET:
+        return jsonify({'error': 'Cron endpoint is not configured'}), 503
+    if request.headers.get('Authorization', '') != f'Bearer {CRON_SECRET}':
+        return jsonify({'error': 'Unauthorized'}), 401
+    return None
+
+
+def _cron_limit(env_name: str, default: int) -> int:
+    """Return a bounded per-run batch size from the environment."""
+    try:
+        return max(1, min(int(os.getenv(env_name, str(default))), 100))
+    except (TypeError, ValueError):
+        return default
+
+
+def _integration_ready(name: str) -> bool:
+    """False for the non-functional placeholders used during initial deployment."""
+    value = os.getenv(name, '').strip().lower()
+    return bool(value) and value not in {'not-configured', 'changeme', 'placeholder'}
+
+
+def _process_pending_campaign_sends(limit: int) -> dict:
+    """Claim and send a bounded slice of queued campaign emails."""
+    conn = get_db()
+    sent = 0
+    failed = 0
+    claimed_ids = []
+    try:
+        rows = conn.execute(
+            """SELECT cs.id, cs.campaign_id, cs.email, cs.lead_id,
+                      c.subject_template, c.body_template, c.email_provider,
+                      l.first_name, l.full_name
+               FROM campaign_sends cs
+               JOIN campaigns c ON c.id = cs.campaign_id
+               LEFT JOIN leads l ON l.lead_id = cs.lead_id
+               WHERE cs.status = 'pending'
+               ORDER BY cs.id
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        if not rows:
+            return {'sent': 0, 'failed': 0, 'total': 0, 'campaigns': 0}
+
+        claimed_ids = [row['id'] for row in rows]
+        placeholders = ','.join('?' for _ in claimed_ids)
+        conn.execute(
+            f"UPDATE campaign_sends SET status = 'processing' "
+            f"WHERE id IN ({placeholders}) AND status = 'pending'",
+            tuple(claimed_ids),
+        )
+        conn.commit()
+
+        now = datetime.utcnow().isoformat()
+        for row in rows:
+            name = row['first_name'] or row['full_name'] or 'there'
+            subject = (row['subject_template'] or '').replace('{name}', name).replace('{first_name}', name)
+            body = (row['body_template'] or '').replace('{name}', name).replace('{first_name}', name)
+            try:
+                if row['email_provider'] == 'mailgun':
+                    _send_via_mailgun(row['email'], subject, body)
+                else:
+                    from email_client import EmailClient
+                    EmailClient().send_email(
+                        recipients=[row['email']], subject=subject, body=body, body_type='html'
+                    )
+                conn.execute(
+                    "UPDATE campaign_sends SET status = 'sent', sent_at = ? "
+                    "WHERE id = ? AND status = 'processing'",
+                    (now, row['id']),
+                )
+                sent += 1
+            except Exception as exc:
+                conn.execute(
+                    "UPDATE campaign_sends SET status = 'failed', error = ? "
+                    "WHERE id = ? AND status = 'processing'",
+                    (redact_credentials(exc)[:500], row['id']),
+                )
+                failed += 1
+
+        campaign_ids = sorted({row['campaign_id'] for row in rows})
+        for cid in campaign_ids:
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM campaign_sends WHERE campaign_id = ? AND status = 'pending'",
+                (cid,),
+            ).fetchone()[0]
+            if remaining:
+                continue
+            counts = conn.execute(
+                "SELECT status, COUNT(*) AS count FROM campaign_sends "
+                "WHERE campaign_id = ? GROUP BY status",
+                (cid,),
+            ).fetchall()
+            breakdown = {item['status']: item['count'] for item in counts}
+            total_sent = breakdown.get('sent', 0)
+            total_failed = breakdown.get('failed', 0)
+            final_status = 'completed' if total_failed == 0 else (
+                'completed' if total_sent > 0 else 'failed'
+            )
+            conn.execute(
+                "UPDATE campaigns SET status = ?, sent_count = ?, failed_count = ?, "
+                "updated_at = ? WHERE id = ?",
+                (final_status, total_sent, total_failed, now, cid),
+            )
+        conn.commit()
+    except Exception as exc:
+        if claimed_ids:
+            placeholders = ','.join('?' for _ in claimed_ids)
+            conn.execute(
+                f"UPDATE campaign_sends SET status = 'pending' "
+                f"WHERE id IN ({placeholders}) AND status = 'processing'",
+                tuple(claimed_ids),
+            )
+            conn.commit()
+        return {'error': redact_credentials(exc)}
+    finally:
+        conn.close()
+
+    return {'sent': sent, 'failed': failed, 'total': sent + failed, 'campaigns': len(campaign_ids)}
+
+
+@app.route('/api/health')
+def api_health():
+    """Minimal liveness/readiness check without exposing CRM data."""
+    conn = _new_connection()
+    try:
+        conn.execute("SELECT 1").fetchone()
+        return jsonify({'status': 'ok'})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'error': redact_credentials(exc)}), 503
+    finally:
+        conn.close()
+
+
+@app.route('/api/cron/poll-leads')
+def api_cron_poll_leads():
+    """Bounded Meta lead polling; external calls only occur on scheduled runs."""
+    denied = _require_cron_auth()
+    if denied:
+        return denied
+    if not _integration_ready('META_PAGE_ACCESS_TOKEN'):
+        return jsonify({'ok': True, 'skipped': True, 'reason': 'Meta credentials not configured'})
+    try:
+        from lead_processor import LeadProcessor
+        stats = LeadProcessor().process_new_leads(limit=_cron_limit('CRON_LEAD_LIMIT', 25))
+        return jsonify({'ok': True, **stats})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': redact_credentials(exc)}), 500
+
+
+@app.route('/api/cron/send-emails')
+def api_cron_send_emails():
+    """Bounded intake email sending; external calls only occur on scheduled runs."""
+    denied = _require_cron_auth()
+    if denied:
+        return denied
+    if not _integration_ready('MS_CLIENT_SECRET'):
+        return jsonify({'ok': True, 'skipped': True, 'reason': 'Email credentials not configured'})
+    try:
+        from email_sender import EmailSender
+        stats = EmailSender().send_pending_emails(
+            limit=_cron_limit('CRON_EMAIL_LIMIT', 10), retry_failed=False
+        )
+        return jsonify({'ok': True, **stats})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': redact_credentials(exc)}), 500
+
+
+@app.route('/api/cron/process-sequences')
+def api_cron_process_sequences():
+    """Advance a bounded number of due sequence enrollments."""
+    denied = _require_cron_auth()
+    if denied:
+        return denied
+    if not (MAILGUN_API_KEY or _integration_ready('MS_CLIENT_SECRET')):
+        return jsonify({'ok': True, 'skipped': True, 'reason': 'Email credentials not configured'})
+    return jsonify(_process_sequences(limit=_cron_limit('CRON_SEQUENCE_LIMIT', 20)))
+
+
+@app.route('/api/cron/process-campaigns')
+def api_cron_process_campaigns():
+    """Send a bounded slice of pending campaign emails."""
+    denied = _require_cron_auth()
+    if denied:
+        return denied
+    if not (MAILGUN_API_KEY or _integration_ready('MS_CLIENT_SECRET')):
+        return jsonify({'ok': True, 'skipped': True, 'reason': 'Email credentials not configured'})
+    return jsonify(_process_pending_campaign_sends(_cron_limit('CRON_CAMPAIGN_LIMIT', 10)))
 
 
 # ---------------------------------------------------------------------------
@@ -3965,5 +4126,5 @@ def index():
 
 if __name__ == '__main__':
     print(f"Starting Arkitekt OpenCRM Dashboard on http://localhost:{DASHBOARD_PORT}")
-    print(f"Database: {DB_PATH}")
-    app.run(host='0.0.0.0', port=DASHBOARD_PORT, debug=True)
+    print(f"Database: {mask_database_url(get_database_url())}")
+    app.run(host='0.0.0.0', port=DASHBOARD_PORT, debug=False)

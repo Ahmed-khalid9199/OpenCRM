@@ -305,11 +305,7 @@ class LeadProcessor:
         db_id = self.database.insert_lead(normalized_lead)
         
         if db_id:
-            logger.info(
-                f"Inserted new lead: {lead_id} (DB ID: {db_id}) - "
-                f"{normalized_lead.get('email', 'no email')} - "
-                f"{normalized_lead.get('full_name', 'no name')}"
-            )
+            logger.info("Inserted new lead %s (DB ID: %s)", lead_id, db_id)
             return 'new'
         else:
             logger.warning(f"Failed to insert lead {lead_id} (possibly duplicate)")

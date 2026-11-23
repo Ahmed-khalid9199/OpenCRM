@@ -40,6 +40,7 @@ Version: 1.0.0
 
 import requests
 import logging
+import re
 import time
 import json
 from typing import Dict, List, Any, Optional, Tuple
@@ -49,6 +50,13 @@ from config import config
 
 # Configure module logger
 logger = logging.getLogger(__name__)
+
+_ACCESS_TOKEN_PATTERN = re.compile(r"(access_token=)[^&\s\"']+", re.IGNORECASE)
+
+
+def _safe_error(exc: object) -> str:
+    """Return exception text with any Meta access_token query value removed."""
+    return _ACCESS_TOKEN_PATTERN.sub(r"\1***", str(exc))
 
 
 class MetaAPIError(Exception):
@@ -140,7 +148,10 @@ class MetaClient:
                 logger.info("Resolved Page Access Token from configured token")
                 return page_token
         except Exception as e:
-            logger.warning(f"Could not resolve page token, using configured token: {e}")
+            logger.warning(
+                "Could not resolve page token (%s), using configured token",
+                type(e).__name__,
+            )
         return token
 
     def _make_request(
@@ -224,7 +235,7 @@ class MetaClient:
                 return data
                 
             except requests.exceptions.Timeout as e:
-                logger.warning(f"Request timeout (attempt {attempt + 1}): {e}")
+                logger.warning("Request timeout for %s (attempt %s)", endpoint, attempt + 1)
                 if attempt < self.max_retries:
                     wait_time = self.retry_delay * (2 ** attempt)
                     logger.info(f"Retrying in {wait_time}s...")
@@ -234,31 +245,39 @@ class MetaClient:
                     
             except requests.exceptions.HTTPError as e:
                 status_code = e.response.status_code if e.response is not None else None
+                # Never include requests' exception text: it contains the full
+                # URL with the access_token query parameter.
+                error_detail = f"HTTP {status_code} ({type(e).__name__}) for {endpoint}"
                 # Only retry on server errors (5xx) or rate limiting (429)
                 if status_code and (status_code >= 500 or status_code == 429):
-                    logger.error(f"Request failed (attempt {attempt + 1}): {e}")
+                    logger.error("Request failed (attempt %s): %s", attempt + 1, error_detail)
                     if attempt < self.max_retries:
                         wait_time = self.retry_delay * (2 ** attempt)
                         logger.info(f"Retrying in {wait_time}s...")
                         time.sleep(wait_time)
                     else:
-                        raise MetaAPIError(f"Request failed after {self.max_retries} retries: {e}") from e
+                        raise MetaAPIError(
+                            f"Request failed after {self.max_retries} retries: {error_detail}"
+                        ) from e
                 else:
                     # Client errors (4xx) are permanent - do not retry
-                    logger.error(f"Request failed with client error {status_code}: {e}")
-                    raise MetaAPIError(f"API request failed ({status_code}): {e}") from e
+                    logger.error("Request failed with client error: %s", error_detail)
+                    raise MetaAPIError(f"API request failed: {error_detail}") from e
 
             except requests.exceptions.RequestException as e:
-                logger.error(f"Request failed (attempt {attempt + 1}): {e}")
+                error_detail = f"{type(e).__name__} for {endpoint}"
+                logger.error("Request failed (attempt %s): %s", attempt + 1, error_detail)
                 if attempt < self.max_retries:
                     wait_time = self.retry_delay * (2 ** attempt)
                     logger.info(f"Retrying in {wait_time}s...")
                     time.sleep(wait_time)
                 else:
-                    raise MetaAPIError(f"Request failed after {self.max_retries} retries: {e}") from e
+                    raise MetaAPIError(
+                        f"Request failed after {self.max_retries} retries: {error_detail}"
+                    ) from e
             
             except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse JSON response: {e}")
+                logger.error("Failed to parse JSON response from %s", endpoint)
                 raise MetaAPIError("Invalid JSON response from API") from e
         
         # Should never reach here, but just in case
@@ -320,8 +339,8 @@ class MetaClient:
             return all_forms
             
         except Exception as e:
-            logger.error(f"Failed to fetch leadgen forms: {e}")
-            raise MetaAPIError(f"Failed to fetch leadgen forms: {e}") from e
+            logger.error(f"Failed to fetch leadgen forms: {_safe_error(e)}")
+            raise MetaAPIError(f"Failed to fetch leadgen forms: {_safe_error(e)}") from e
     
     def get_leads_for_form(
         self,
@@ -369,7 +388,7 @@ class MetaClient:
                         parsed_lead = self._parse_lead(raw_lead, form_id)
                         all_leads.append(parsed_lead)
                     except Exception as e:
-                        logger.error(f"Failed to parse lead {raw_lead.get('id')}: {e}")
+                        logger.error(f"Failed to parse lead {raw_lead.get('id')}: {_safe_error(e)}")
                         # Continue with other leads
                         continue
                 
@@ -401,8 +420,8 @@ class MetaClient:
             return all_leads
             
         except Exception as e:
-            logger.error(f"Failed to fetch leads for form {form_id}: {e}")
-            raise MetaAPIError(f"Failed to fetch leads: {e}") from e
+            logger.error(f"Failed to fetch leads for form {form_id}: {_safe_error(e)}")
+            raise MetaAPIError(f"Failed to fetch leads: {_safe_error(e)}") from e
     
     def _parse_lead(self, raw_lead: Dict[str, Any], form_id: str) -> Dict[str, Any]:
         """
@@ -468,7 +487,7 @@ class MetaClient:
             if len(name_parts) >= 2 and not parsed_lead['last_name']:
                 parsed_lead['last_name'] = name_parts[1]
         
-        logger.debug(f"Parsed lead {lead_id}: {parsed_lead.get('email', 'no email')} - {parsed_lead.get('full_name', 'no name')}")
+        logger.debug("Parsed lead %s", lead_id)
         
         return parsed_lead
     
@@ -543,7 +562,7 @@ class MetaClient:
                     all_leads.extend(leads)
                     logger.info(f"Retrieved {len(leads)} leads from form {form_name}")
                 except Exception as e:
-                    logger.error(f"Failed to fetch leads from form {form_id}: {e}")
+                    logger.error(f"Failed to fetch leads from form {form_id}: {_safe_error(e)}")
                     # Continue with other forms
                     continue
             
@@ -551,8 +570,8 @@ class MetaClient:
             return all_leads
             
         except Exception as e:
-            logger.error(f"Failed to fetch all leads: {e}")
-            raise MetaAPIError(f"Failed to fetch all leads: {e}") from e
+            logger.error(f"Failed to fetch all leads: {_safe_error(e)}")
+            raise MetaAPIError(f"Failed to fetch all leads: {_safe_error(e)}") from e
     
     def get_lead_by_id(self, lead_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -587,7 +606,7 @@ class MetaClient:
             return parsed_lead
             
         except MetaAPIError as e:
-            logger.error(f"Failed to fetch lead {lead_id}: {e}")
+            logger.error(f"Failed to fetch lead {lead_id}: {_safe_error(e)}")
             return None
     
     def test_connection(self) -> Tuple[bool, str]:
@@ -617,7 +636,7 @@ class MetaClient:
             return True, message
             
         except Exception as e:
-            message = f"Failed to connect to Meta API: {e}"
+            message = f"Failed to connect to Meta API: {_safe_error(e)}"
             logger.error(message)
             return False, message
 
@@ -686,6 +705,6 @@ if __name__ == '__main__':
         print("=" * 80 + "\n")
         
     except Exception as e:
-        print(f"\n[ERROR] Test failed: {e}")
+        print(f"\n[ERROR] Test failed: {_safe_error(e)}")
         import traceback
         traceback.print_exc()

@@ -4,7 +4,7 @@ Credential & Connection Test Script
 Tests connectivity to all external services used by the Meta Leads pipeline:
 1. Meta Graph API - fetches page info
 2. Microsoft Graph API - acquires OAuth2 token and fetches sender profile
-3. SQLite Database - verifies schema and reports lead count
+3. PostgreSQL Database - verifies DATABASE_URL connectivity and reports lead count
 
 Usage:
     python scripts/test_credentials.py

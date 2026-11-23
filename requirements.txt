@@ -5,7 +5,7 @@
 # Project Components:
 # - Meta Lead Ads API integration
 # - Microsoft Graph API for Outlook/email operations
-# - SQLite database operations
+# - PostgreSQL database operations (SQLAlchemy + Alembic)
 # - Configuration management
 # - HTTP requests and API calls
 # - Scheduling and automation
@@ -50,9 +50,14 @@ pytz==2023.3.post1
 
 # Database
 # --------
-# Note: sqlite3 is included in Python standard library (no external package needed)
-# SQLAlchemy: Optional ORM if advanced database operations are needed (commented out)
-# SQLAlchemy==2.0.23
+# SQLAlchemy: ORM and SQL toolkit used by the consolidated data-access layer
+SQLAlchemy==2.0.36
+
+# Alembic: schema migrations for PostgreSQL
+alembic==1.14.1
+
+# psycopg 3: PostgreSQL driver (binary wheels include libpq)
+psycopg[binary]==3.2.3
 
 # Scheduling and Automation
 # --------------------------

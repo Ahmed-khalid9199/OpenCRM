@@ -390,7 +390,7 @@ def log_config_summary(logger: logging.Logger) -> None:
     logger.info(f"  Debug Mode: {config.debug}")
     logger.info(f"  Dry Run: {config.dry_run}")
     logger.info(f"  Poll Interval: {config.poll_interval_seconds}s")
-    logger.info(f"  Database: {config.db_path}")
+    logger.info(f"  Database: {config._mask_database_url(config.database_url, True)}")
     logger.info(f"  Log Level: {config.log_level}")
     logger.info(f"  Sender Email: {config.ms_sender_email}")
     logger.info(f"  Booking URL: {config.booking_url}")

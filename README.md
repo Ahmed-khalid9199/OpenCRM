@@ -25,9 +25,9 @@
 
 ```
 ┌──────────────┐          ┌──────────────┐         ┌──────────────┐
-│   Meta API   │          │   SQLite DB  │         │  Outlook /   │
-│  Lead Fetch  │──────────│   Storage    │─────────│  Mailgun     │
-│              │          │              │         │  Email Send  │
+│   Meta API   │          │  PostgreSQL  │         │  Outlook /   │
+│  Lead Fetch  │──────────│  SQLAlchemy  │─────────│  Mailgun     │
+│              │          │  + Alembic   │         │  Email Send  │
 └──────────────┘          └──────────────┘         └──────────────┘
                                  │
               ┌──────────────────┼──────────────────┐
@@ -66,6 +66,12 @@ MS_SENDER_EMAIL=you@yourdomain.com
 # Booking URL (included in outreach emails)
 BOOKING_URL=https://calendly.com/you/30min
 
+# PostgreSQL (single source of truth for pipeline + dashboard)
+DATABASE_URL=postgresql+psycopg://opencrm:your-local-password@localhost:5432/opencrm
+POSTGRES_DB=opencrm
+POSTGRES_USER=opencrm
+POSTGRES_PASSWORD=your-local-password
+
 # Branding
 SENDER_NAME=Jane Smith
 COMPANY_NAME=Acme Corp
@@ -80,24 +86,98 @@ LLM_API_KEY=sk-...
 ### 2. Run with Docker
 
 ```bash
-docker-compose up -d
+docker compose up -d --build
 ```
 
-This starts two services:
+This starts four services:
+- **PostgreSQL 16** (port 5432) — local development database with a persistent volume
+- **Migrate** — one-shot Alembic job that applies the schema before the apps start
 - **Pipeline** (port 9010) — polls Meta for new leads, sends automated emails
 - **Dashboard** (port 5050) — web UI for managing leads, campaigns, and reporting
 
+No password is committed to the repository: `POSTGRES_PASSWORD` must be set in `.env`.
+
 ### 3. Open the Dashboard
 
-Visit **http://localhost:5050** — default login: `admin` / `admin`
-
-Change credentials via `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` in `.env`.
+Visit **http://localhost:5050**. `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD` and `DASHBOARD_SECRET_KEY` are required. The old `admin` / `admin` fallback has been removed; generate strong values before starting the dashboard.
 
 ### 4. Verify
 
 ```bash
 curl http://localhost:9010/health
 ```
+
+---
+
+## Database & Migrations
+
+All application database access goes through one SQLAlchemy engine configured by
+`DATABASE_URL`. `dashboard.py` and the pipeline worker share the same models,
+session factory, and Alembic-managed schema. The old SQLite file is retained only
+as a migration source and rollback reference.
+
+### Apply migrations
+
+```bash
+# Local Python environment (DATABASE_URL must be set)
+alembic upgrade head
+
+# Docker Compose (also runs automatically on `docker compose up`)
+docker compose run --rm migrate
+```
+
+Alembic owns schema creation. Application startup no longer creates tables.
+
+### Import the legacy SQLite data
+
+The migration utility opens `data/leads.db` **read-only**, preserves all primary
+keys and relationships, converts JSON text to `JSONB` and timestamp text to
+`TIMESTAMPTZ`, and reports inserted/skipped rows per table. It is safe to rerun.
+
+```bash
+# Inspect source counts without writing anything
+python scripts/migrate_sqlite_to_postgres.py --dry-run
+
+# Migrate into DATABASE_URL (runs `alembic upgrade head` first)
+python scripts/migrate_sqlite_to_postgres.py --sqlite-path data/leads.db
+
+# In Compose, run it against the local database
+docker compose run --rm --volume "$PWD/data:/app/data:ro" migrate \
+  python scripts/migrate_sqlite_to_postgres.py
+```
+
+The script verifies the SQLite file hash before and after the run and validates
+target row IDs and foreign keys before exiting.
+
+### Reset a local development database
+
+This is **destructive** and intentionally kept out of CI:
+
+```bash
+python scripts/reset_dev_db.py --force
+```
+
+It refuses non-local hosts and databases not named `opencrm*` or `*test*`.
+
+### Tests
+
+The automated suite starts an embedded PostgreSQL 16 instance when
+`TEST_POSTGRES_ADMIN_URL` is not set:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+To use an existing PostgreSQL server instead:
+
+```bash
+TEST_POSTGRES_ADMIN_URL=postgresql+psycopg://user:password@localhost:5432/postgres \
+  python -m pytest -q
+```
+
+`test_integration.py` at the repository root is a manual/live smoke script and is
+not collected by pytest.
 
 ---
 
@@ -108,17 +188,17 @@ Arkitekt OpenCRM is designed to be self-hosted. For production use:
 **Recommended setup:**
 - Spin up a small **EC2 instance** (or equivalent — DigitalOcean Droplet, Hetzner, etc.). A `t3.small` or `t3.medium` is plenty.
 - Install Docker and Docker Compose
-- Clone the repo, configure `.env`, run `docker-compose up -d`
-- Data is persisted via Docker volumes (`./data` and `./logs` are bind-mounted), so your database survives container restarts and redeployments
+- Clone the repo, configure `.env`, run `docker compose up -d --build`
+- PostgreSQL data is persisted in the `opencrm-postgres-data` Docker volume; `./logs` is bind-mounted for log retention
 - Put it behind a reverse proxy (nginx, Caddy, Traefik) with HTTPS if exposing the dashboard externally
-- For backups, periodically copy `./data/leads.db` to S3 or equivalent
+- For backups, use `pg_dump` against the configured `DATABASE_URL`. Export `.env` first (`set -a; . ./.env; set +a`) then run `pg_dump "$DATABASE_URL" > backup.sql`, or use `docker compose exec postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backup.sql`. Store dumps off-host
 
-**Docker persistence:** The SQLite database is stored at `./data/leads.db` on the host via a bind mount. Your data lives on the host filesystem, not inside the container. Restarting, rebuilding, or updating containers will not lose data.
+**Vercel (serverless):** `api/index.py` is the Flask WSGI entrypoint and `vercel.json` rewrites dashboard routes to it. Alembic runs during the Vercel build via `python scripts/vercel_migrate.py`, so no runtime table creation occurs. Set `DB_SERVERLESS_MODE=true` so each function invocation uses `NullPool`. Daily Hobby Cron jobs call `/api/cron/poll-leads`, `/api/cron/send-emails`, `/api/cron/process-sequences`, and `/api/cron/process-campaigns`; each requires `Authorization: Bearer $CRON_SECRET`. Real-time webhook intake remains available at `/api/webhook/leads` with header-only key authentication.
 
 **Updating:**
 ```bash
 git pull
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
 ---
@@ -169,7 +249,7 @@ docker-compose up -d --build
 - Graceful shutdown (SIGTERM/SIGINT)
 - Structured logging with rotation
 - Retry logic with exponential backoff
-- Thread-safe SQLite with connection pooling
+- Pooled PostgreSQL access with a serverless-aware `NullPool` option
 
 ---
 
@@ -220,10 +300,25 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `POLL_INTERVAL_SECONDS` | Lead polling interval | `900` (15 min) |
-| `DB_PATH` | SQLite database path | `/app/data/leads.db` |
+| `DATABASE_URL` | PostgreSQL connection string (required) | *(none)* |
+| `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | Local Compose database settings | `opencrm` / `opencrm` / *(required)* |
+| `DB_DRIVER` | SQLAlchemy driver for generic `postgres://` URLs | `postgresql+psycopg` |
+| `DB_APPLICATION_NAME` | PostgreSQL `application_name` for logs | `opencrm` |
+| `DB_SERVERLESS_MODE` | Use `NullPool` for serverless functions | `false` |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | Long-running connection pool limits | `5` / `5` |
+| `DB_POOL_TIMEOUT` | Seconds to wait for a pooled connection | `30` |
+| `DB_POOL_RECYCLE` | Seconds before recycling a pooled connection | `1800` |
+| `DB_SSLMODE` | PostgreSQL TLS mode (e.g. `require`) | *(empty)* |
+| `DB_ECHO` | Log SQL statements (debug only) | `false` |
+| `DOTENV_OVERRIDE` | Let `.env` override platform-provided variables | `false` |
+| `SQLITE_MIGRATION_SOURCE` | Legacy read-only migration source | `/app/data/leads.db` |
+| `DB_PATH` | Legacy alias for the SQLite migration source | `/app/data/leads.db` |
 | `LOG_LEVEL` | Logging verbosity | `INFO` |
 | `DASHBOARD_USERNAME` | Dashboard login | `admin` |
-| `DASHBOARD_PASSWORD` | Dashboard password | `admin` |
+| `DASHBOARD_PASSWORD` | Dashboard password (required; placeholders refused) | *(none)* |
+| `DASHBOARD_SECRET_KEY` | Flask session signing key (required, persistent) | *(none)* |
+| `CRON_SECRET` | Bearer secret for `/api/cron/*` | *(none)* |
+| `SESSION_COOKIE_SECURE` | HTTPS-only session cookies; disable only for local HTTP tests | `true` |
 
 ---
 
@@ -309,31 +404,46 @@ We'd love community-contributed connectors. To submit one:
 
 ```
 ├── main.py              # Entry point — orchestrates the polling loop
-├── config.py            # Configuration loading & validation
-├── database.py          # SQLite operations (CRUD, schema, migrations)
+├── config.py            # Configuration loading & validation (DATABASE_URL)
+├── database.py          # Compatibility facade over CRMRepository
+├── legacy_sqlite_database.py  # Original SQLite implementation (rollback only)
+├── db/
+│   ├── models.py        # SQLAlchemy models for all 7 entities
+│   ├── session.py       # Engine, scoped sessions, pooling/serverless mode
+│   └── repository.py    # Domain CRUD + sqlite-call compatibility facade
+├── migrations/
+│   ├── env.py           # Alembic environment
+│   └── versions/        # Schema revisions
+├── alembic.ini          # Alembic configuration
 ├── meta_client.py       # Meta Graph API client (lead fetching)
 ├── email_client.py      # Microsoft Graph API + SMTP email sending
 ├── lead_processor.py    # Lead ingestion orchestration
 ├── email_sender.py      # Email sending orchestration
 ├── templates.py         # HTML/text email templates
-├── dashboard.py         # Flask web dashboard (all features)
+├── dashboard.py         # Flask web dashboard/API
 ├── health_check.py      # HTTP health check server
 ├── logger.py            # Centralized logging
 ├── scripts/
-│   ├── init_db.py       # Database initialization
-│   ├── manual_send.py   # Manual email testing
-│   └── test_credentials.py  # Credential validation
+│   ├── init_db.py                  # Alembic upgrade + schema validation
+│   ├── migrate_sqlite_to_postgres.py  # Read-only SQLite data migration
+│   ├── reset_dev_db.py             # Destructive local reset (manual only)
+│   ├── manual_send.py              # Manual email testing
+│   └── test_credentials.py         # Credential validation
+├── tests/               # PostgreSQL integration tests
+├── pytest.ini
 ├── Dockerfile           # Multi-stage Docker build
-├── docker-compose.yml   # Service orchestration
-├── .env.example         # Configuration template
-└── requirements.txt     # Python dependencies
+├── docker-compose.yml   # PostgreSQL + migrate + pipeline + dashboard
+├── .env.example         # Configuration template (no real credentials)
+├── requirements.txt     # Runtime dependencies
+└── requirements-dev.txt # Test dependencies (includes embedded PostgreSQL)
 ```
 
 ---
 
 ## Roadmap
 
-- [ ] PostgreSQL database support
+- [x] PostgreSQL database support (SQLAlchemy + Alembic, single data layer)
+- [x] Vercel deployment of the Flask dashboard/API using managed PostgreSQL
 - [ ] Lead scoring and prioritization
 - [ ] A/B testing for email templates
 - [ ] Email open/click tracking (via Mailgun webhooks)
@@ -364,6 +474,8 @@ Contributions are welcome! This project was generated by [Arkitekt AI](https://a
 ## Security
 
 **Do NOT** open public GitHub issues for security vulnerabilities. Please report them via the repository's [security advisory](../../security/advisories/new) feature or contact us directly.
+
+The Phase 1 security assessment remains open: default `admin`/`admin` credentials, salted SHA-256 with plaintext fallback, random session-secret fallback, no CSRF protection, and weak webhook key handling were documented but are unchanged in Phase 2. Do not expose the dashboard publicly until those findings are remediated.
 
 ---
 
