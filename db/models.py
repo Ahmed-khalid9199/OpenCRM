@@ -256,3 +256,10 @@ class CampaignSend(Base):
 
     campaign: Mapped[Campaign] = relationship(back_populates="sends")
     lead: Mapped[Lead] = relationship(back_populates="campaign_sends")
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)

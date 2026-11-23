@@ -139,3 +139,77 @@ def test_sequences_and_campaign_queries(client) -> None:
         "/api/campaigns/filter-preview", json={"filters": {"status": "intake"}}
     ).status_code == 200
     assert client.get("/api/campaigns").status_code == 200
+
+
+def test_kanban_labels_are_persisted(client) -> None:
+    assert client.get("/api/kanban").get_json()["labels"] == {}
+
+    response = client.post(
+        "/api/kanban/labels", json={"status": "intake", "label": "New Leads"}
+    )
+    assert response.status_code == 200
+    assert response.get_json()["labels"]["intake"] == "New Leads"
+    assert client.get("/api/kanban").get_json()["labels"]["intake"] == "New Leads"
+    assert client.post(
+        "/api/kanban/labels", json={"status": "unknown", "label": "Invalid"}
+    ).status_code == 400
+
+
+def test_csv_export_adds_tag_columns(client) -> None:
+    import csv
+    import io
+
+    lead_id = client.post(
+        "/api/lead",
+        json={"email": "export@example.com", "first_name": "Export", "lead_source": "manual"},
+    ).get_json()["lead_id"]
+    assert client.patch(
+        f"/api/lead/{lead_id}/tags",
+        json={
+            "industry": "Technology",
+            "lead_source": "Website",
+            "custom": ["VIP", "Technology", "follow-up"],
+        },
+    ).status_code == 200
+
+    response = client.get("/api/leads/export/csv")
+    assert response.status_code == 200
+    reader = csv.DictReader(io.StringIO(response.data.decode("utf-8")))
+    assert {"Industry", "Lead Source", "Tags"} <= set(reader.fieldnames)
+    row = next(reader)
+    assert row["Industry"] == "Technology"
+    assert row["Lead Source"] == "Website"
+    assert row["Tags"] == "VIP"
+    assert row["lead_source"] == "manual"
+
+
+def test_admin_can_add_tag_options(client) -> None:
+    import dashboard
+
+    assert client.get("/api/tags/options").get_json() == {
+        "industries": [],
+        "lead_sources": [],
+    }
+
+    response = client.post(
+        "/api/tags/options", json={"kind": "industries", "value": "Aerospace"}
+    )
+    assert response.status_code == 200
+    assert "Aerospace" in client.get("/api/tags/options").get_json()["industries"]
+
+    assert client.post(
+        "/api/users",
+        json={
+            "username": "viewer",
+            "password": "viewer-pass",
+            "display_name": "Viewer",
+            "role": "user",
+        },
+    ).status_code == 201
+    viewer = dashboard.app.test_client()
+    assert viewer.post(
+        "/login", data={"username": "viewer", "password": "viewer-pass"}
+    ).status_code in (200, 302)
+    assert viewer.post(
+        "/api/tags/options", json={"kind": "industries", "value": "Retail"}
+    ).status_code == 403
