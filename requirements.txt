@@ -51,13 +51,15 @@ pytz==2023.3.post1
 # Database
 # --------
 # SQLAlchemy: ORM and SQL toolkit used by the consolidated data-access layer
-SQLAlchemy==2.0.36
+# 2.0.58 ships cp314 wheels, matching Vercel's current Python builder.
+SQLAlchemy==2.0.58
 
 # Alembic: schema migrations for PostgreSQL
 alembic==1.14.1
 
 # psycopg 3: PostgreSQL driver (binary wheels include libpq)
-psycopg[binary]==3.2.3
+# 3.3.9 ships cp314 wheels; older 3.2.x does not.
+psycopg[binary]==3.3.9
 
 # Scheduling and Automation
 # --------------------------
