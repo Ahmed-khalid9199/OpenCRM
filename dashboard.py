@@ -143,6 +143,36 @@ def _new_connection() -> SQLAlchemyConnection:
     return SQLAlchemyConnection()
 
 
+def _get_app_setting(name: str, default):
+    """Read a JSON-encoded application setting from the settings table."""
+    conn = _new_connection()
+    try:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (name,)).fetchone()
+        if not row:
+            return default
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return default
+    finally:
+        conn.close()
+
+
+def _set_app_setting(name: str, value) -> None:
+    """Write a JSON-encoded application setting to the settings table."""
+    conn = _new_connection()
+    try:
+        conn.execute(
+            """INSERT INTO app_settings (key, value) VALUES (?, ?)
+               ON CONFLICT (key) DO UPDATE SET value = excluded.value
+               RETURNING key""",
+            (name, json.dumps(value)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _ensure_bootstrap_admin() -> None:
     """Create or align the configured admin user with the environment.
 
@@ -526,9 +556,31 @@ def api_kanban():
             else:
                 columns['other'].append(row)
 
-        return jsonify({'columns': columns, 'column_order': KANBAN_COLUMNS + ['other']})
+        return jsonify({
+            'columns': columns,
+            'column_order': KANBAN_COLUMNS + ['other'],
+            'labels': _get_app_setting('kanban_labels', {}),
+        })
     finally:
         conn.close()
+
+
+@app.route('/api/kanban/labels', methods=['POST'])
+@login_required
+def api_set_kanban_label():
+    """Persist a display-only label for one Kanban column."""
+    data = request.get_json(silent=True) or {}
+    status = (data.get('status') or '').strip()
+    label = (data.get('label') or '').strip()
+    if status not in KANBAN_COLUMNS + ['other']:
+        return jsonify({'error': 'Unknown Kanban column'}), 400
+    if not label or len(label) > 60:
+        return jsonify({'error': 'Label must be between 1 and 60 characters'}), 400
+
+    labels = _get_app_setting('kanban_labels', {})
+    labels[status] = label
+    _set_app_setting('kanban_labels', labels)
+    return jsonify({'labels': labels})
 
 
 # ---------------------------------------------------------------------------
@@ -2486,11 +2538,25 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 2px rgba(59,130,246,0.3
         <template x-for="col in kanbanOrder" :key="col">
           <div class="flex-shrink-0 w-[85vw] sm:w-72 card rounded-xl p-3 flex flex-col snap-center">
             <!-- Column header -->
-            <div class="flex items-center justify-between mb-3">
-              <h3 class="font-semibold text-sm uppercase tracking-wide"
-                  :class="kanbanHeaderClass(col)" x-text="col"></h3>
-              <span class="text-xs text-gray-500 bg-gray-800 rounded-full px-2 py-0.5"
-                    x-text="(kanbanData[col] || []).length"></span>
+            <div class="flex items-center justify-between mb-3 gap-2">
+              <template x-if="renamingColumn === col">
+                <div class="flex items-center gap-1">
+                  <input type="text" x-model="columnLabelDraft" @keydown.enter.prevent="saveColumnLabel(col)"
+                    class="w-28 bg-white/[0.04] border border-white/[0.08] text-gray-100 rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500/50">
+                  <button type="button" class="text-[10px] text-blue-400 hover:text-blue-300" @click="saveColumnLabel(col)">Save</button>
+                </div>
+              </template>
+              <template x-if="renamingColumn !== col">
+                <h3 class="font-semibold text-sm uppercase tracking-wide"
+                    :class="kanbanHeaderClass(col)" x-text="kanbanLabel(col)"></h3>
+              </template>
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-gray-500 bg-gray-800 rounded-full px-2 py-0.5"
+                      x-text="(kanbanData[col] || []).length"></span>
+                <button type="button" class="text-[10px] text-gray-500 hover:text-blue-400"
+                  @click="renamingColumn === col ? renamingColumn = '' : startColumnRename(col)"
+                  x-text="renamingColumn === col ? 'Cancel' : 'Rename'"></button>
+              </div>
             </div>
 
             <!-- Cards -->
@@ -3433,6 +3499,9 @@ function dashboard() {
     // kanban
     kanbanData: {},
     kanbanOrder: [],
+    kanbanLabels: {},
+    renamingColumn: '',
+    columnLabelDraft: '',
     allKanbanStatuses: ['intake','emailed','contacted','qualified','closed','failed','skipped_invalid_email'],
 
     // modal
@@ -3566,7 +3635,35 @@ function dashboard() {
         const data = await r.json();
         this.kanbanData = data.columns;
         this.kanbanOrder = data.column_order;
+        this.kanbanLabels = data.labels || {};
       } catch (e) { console.error('kanban', e); }
+    },
+
+    kanbanLabel(col) {
+      if (this.kanbanLabels[col]) return this.kanbanLabels[col];
+      return col === 'other' ? 'Other' : col.charAt(0).toUpperCase() + col.slice(1);
+    },
+
+    startColumnRename(col) {
+      this.renamingColumn = col;
+      this.columnLabelDraft = this.kanbanLabel(col);
+    },
+
+    async saveColumnLabel(col) {
+      const label = (this.columnLabelDraft || '').trim();
+      if (!label) return;
+      try {
+        const r = await fetch('/api/kanban/labels', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: col, label: label }),
+        });
+        if (r.ok) {
+          const data = await r.json();
+          this.kanbanLabels = data.labels;
+          this.renamingColumn = '';
+        }
+      } catch (e) { console.error('kanbanLabel', e); }
     },
 
     async fetchReports() {

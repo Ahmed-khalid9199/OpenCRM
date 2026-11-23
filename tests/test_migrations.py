@@ -13,6 +13,7 @@ from db.session import get_database_url
 
 EXPECTED_TABLES = {
     "alembic_version",
+    "app_settings",
     "campaign_sends",
     "campaigns",
     "lead_notes",
@@ -48,7 +49,7 @@ def test_alembic_creates_complete_schema(pg_database: str) -> None:
                 expected_nullable = {column.name: column.nullable for column in table.columns}
                 assert actual_nullable == expected_nullable, table_name
 
-            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0001_initial_schema"
+            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0002_app_settings"
 
             leads = {col["name"] for col in inspector.get_columns("leads")}
             assert leads == {
@@ -101,6 +102,6 @@ def test_downgrade_and_upgrade_are_reversible(pg_database: str) -> None:
         with engine.connect() as connection:
             tables = set(inspect(connection).get_table_names())
             assert EXPECTED_TABLES <= tables
-            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0001_initial_schema"
+            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0002_app_settings"
     finally:
         engine.dispose()

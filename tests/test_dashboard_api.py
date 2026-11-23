@@ -139,3 +139,17 @@ def test_sequences_and_campaign_queries(client) -> None:
         "/api/campaigns/filter-preview", json={"filters": {"status": "intake"}}
     ).status_code == 200
     assert client.get("/api/campaigns").status_code == 200
+
+
+def test_kanban_labels_are_persisted(client) -> None:
+    assert client.get("/api/kanban").get_json()["labels"] == {}
+
+    response = client.post(
+        "/api/kanban/labels", json={"status": "intake", "label": "New Leads"}
+    )
+    assert response.status_code == 200
+    assert response.get_json()["labels"]["intake"] == "New Leads"
+    assert client.get("/api/kanban").get_json()["labels"]["intake"] == "New Leads"
+    assert client.post(
+        "/api/kanban/labels", json={"status": "unknown", "label": "Invalid"}
+    ).status_code == 400
