@@ -8,7 +8,11 @@ import os
 import subprocess
 import sys
 
-from db.session import get_database_url, mask_database_url, redact_credentials
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from db.session import get_database_url, mask_database_url, redact_credentials  # noqa: E402
 
 
 def main() -> int:
