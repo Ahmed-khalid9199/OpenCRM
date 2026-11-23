@@ -144,21 +144,35 @@ def _new_connection() -> SQLAlchemyConnection:
 
 
 def _ensure_bootstrap_admin() -> None:
-    """Create the initial admin user once, preserving legacy behaviour."""
+    """Create or align the configured admin user with the environment.
+
+    The dashboard password is managed through DASHBOARD_PASSWORD, so an
+    existing bootstrap admin is updated when that value rotates. Other users
+    and password changes made in the UI are left untouched.
+    """
     global _bootstrapped
     if _bootstrapped:
         return
 
     conn = _new_connection()
     try:
-        if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+        existing = conn.execute(
+            "SELECT id FROM users WHERE username = ?", (DASHBOARD_USERNAME,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE users SET password = ? WHERE username = ?",
+                (_hash_password(DASHBOARD_PASSWORD), DASHBOARD_USERNAME),
+            )
+            logger.info("Updated bootstrap admin password: %s", DASHBOARD_USERNAME)
+        else:
             conn.execute(
                 "INSERT INTO users (username, password, display_name, role) "
                 "VALUES (?, ?, ?, ?)",
                 (DASHBOARD_USERNAME, _hash_password(DASHBOARD_PASSWORD), 'Admin', 'admin'),
             )
-            conn.commit()
             logger.info("Created bootstrap admin user: %s", DASHBOARD_USERNAME)
+        conn.commit()
         _bootstrapped = True
     except DatabaseError as exc:
         logger.error("Failed to bootstrap admin user: %s", exc)
