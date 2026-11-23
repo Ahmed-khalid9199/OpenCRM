@@ -193,7 +193,16 @@ Arkitekt OpenCRM is designed to be self-hosted. For production use:
 - Put it behind a reverse proxy (nginx, Caddy, Traefik) with HTTPS if exposing the dashboard externally
 - For backups, use `pg_dump` against the configured `DATABASE_URL`. Export `.env` first (`set -a; . ./.env; set +a`) then run `pg_dump "$DATABASE_URL" > backup.sql`, or use `docker compose exec postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backup.sql`. Store dumps off-host
 
-**Vercel (serverless):** `api/index.py` is the Flask WSGI entrypoint and `vercel.json` rewrites dashboard routes to it. Alembic runs during the Vercel build via `python scripts/vercel_migrate.py`, so no runtime table creation occurs. Set `DB_SERVERLESS_MODE=true` so each function invocation uses `NullPool`. Daily Hobby Cron jobs call `/api/cron/poll-leads`, `/api/cron/send-emails`, `/api/cron/process-sequences`, and `/api/cron/process-campaigns`; each requires `Authorization: Bearer $CRON_SECRET`. Real-time webhook intake remains available at `/api/webhook/leads` with header-only key authentication.
+**Vercel (serverless):** `api/index.py` is the Flask WSGI entrypoint and `vercel.json` rewrites all routes to it. Alembic runs during the Vercel build via `python scripts/vercel_migrate.py`, so no runtime table creation occurs. Set `DB_SERVERLESS_MODE=true` so each function invocation uses `NullPool`. Daily Hobby Cron jobs call `/api/cron/poll-leads`, `/api/cron/send-emails`, `/api/cron/process-sequences`, and `/api/cron/process-campaigns`; each requires `Authorization: Bearer $CRON_SECRET`. Real-time webhook intake remains available at `/api/webhook/leads` with header-only key authentication.
+
+**Neon Free backups:** Neon Free includes 6-hour point-in-time restore (up to 1 GB of change history) and one manual snapshot, but no scheduled backup policy and no copy independent of Neon. Scheduled backups are a paid Neon feature; no automated free backup is configured for this deployment. For an independent free copy, run `pg_dump` from a trusted machine and store the encrypted dump outside Neon and Vercel:
+
+```bash
+pg_dump --format=custom --no-owner --no-privileges "$DATABASE_URL" -f opencrm-YYYYMMDD.dump
+pg_restore --clean --if-exists --no-owner --no-privileges -d "$TARGET_DATABASE_URL" opencrm-YYYYMMDD.dump
+```
+
+Never commit dumps to Git. Restore during a quiet period and verify the CRM after restoring.
 
 **Updating:**
 ```bash
