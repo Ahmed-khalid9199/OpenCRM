@@ -446,12 +446,45 @@ def api_leads_export_csv():
         )
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
+        export_columns = []
+        for column in columns:
+            if column == 'tags':
+                export_columns.extend(['Industry', 'Lead Source', 'Tags'])
+            else:
+                export_columns.append(column)
 
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow(columns)
+        writer.writerow(export_columns)
         for row in rows:
-            writer.writerow([row[col] for col in columns])
+            raw_tags = row['tags']
+            try:
+                tags = json.loads(raw_tags) if isinstance(raw_tags, str) else (raw_tags or {})
+            except (json.JSONDecodeError, TypeError):
+                tags = {}
+            if not isinstance(tags, dict):
+                tags = {}
+
+            industry = tags.get('industry') or ''
+            lead_source = tags.get('lead_source') or ''
+            custom = tags.get('custom') or []
+            if isinstance(custom, str):
+                custom = [custom]
+            excluded = {str(industry).casefold(), str(lead_source).casefold()} - {''}
+            first_custom = ''
+            for tag in custom:
+                tag_text = str(tag).strip()
+                if tag_text and tag_text.casefold() not in excluded:
+                    first_custom = tag_text
+                    break
+
+            values = []
+            for column in columns:
+                if column == 'tags':
+                    values.extend([industry, lead_source, first_custom])
+                else:
+                    values.append(row[column])
+            writer.writerow(values)
 
         buf.seek(0)
         timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')

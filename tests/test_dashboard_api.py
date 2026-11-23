@@ -153,3 +153,31 @@ def test_kanban_labels_are_persisted(client) -> None:
     assert client.post(
         "/api/kanban/labels", json={"status": "unknown", "label": "Invalid"}
     ).status_code == 400
+
+
+def test_csv_export_adds_tag_columns(client) -> None:
+    import csv
+    import io
+
+    lead_id = client.post(
+        "/api/lead",
+        json={"email": "export@example.com", "first_name": "Export", "lead_source": "manual"},
+    ).get_json()["lead_id"]
+    assert client.patch(
+        f"/api/lead/{lead_id}/tags",
+        json={
+            "industry": "Technology",
+            "lead_source": "Website",
+            "custom": ["VIP", "Technology", "follow-up"],
+        },
+    ).status_code == 200
+
+    response = client.get("/api/leads/export/csv")
+    assert response.status_code == 200
+    reader = csv.DictReader(io.StringIO(response.data.decode("utf-8")))
+    assert {"Industry", "Lead Source", "Tags"} <= set(reader.fieldnames)
+    row = next(reader)
+    assert row["Industry"] == "Technology"
+    assert row["Lead Source"] == "Website"
+    assert row["Tags"] == "VIP"
+    assert row["lead_source"] == "manual"
