@@ -115,17 +115,10 @@ if not LLM_PROVIDER:
     LLM_PROVIDER = 'anthropic' if LLM_API_KEY.startswith('sk-ant-') else 'openai'
 SENDER_NAME = os.getenv('SENDER_NAME', '')
 
-# Predefined tag options for dropdowns
+# Editable tag option lists; admins add values through the dashboard.
 TAG_OPTIONS = {
-    'industries': [
-        'Technology', 'Healthcare', 'Finance', 'Real Estate', 'Retail',
-        'Manufacturing', 'Education', 'Legal', 'Construction', 'Hospitality',
-        'Marketing', 'Consulting', 'Nonprofit', 'Other',
-    ],
-    'lead_sources': [
-        'Conference', 'Referral', 'Website', 'LinkedIn', 'Cold Outreach',
-        'Networking Event', 'Trade Show', 'Partner', 'Other',
-    ],
+    'industries': [],
+    'lead_sources': [],
 }
 
 logger = logging.getLogger(__name__)
@@ -709,11 +702,46 @@ def api_update_tags(lead_id: str):
         conn.close()
 
 
+def _merged_tag_options():
+    """Return the editable dropdown options."""
+    options = {key: list(values) for key, values in TAG_OPTIONS.items()}
+    custom = _get_app_setting('tag_options', {})
+    for key in options:
+        for value in custom.get(key, []):
+            if isinstance(value, str) and value.strip() and value not in options[key]:
+                options[key].append(value)
+    return options
+
+
 @app.route('/api/tags/options')
 @login_required
 def api_tag_options():
-    """Return predefined dropdown options for tags."""
-    return jsonify(TAG_OPTIONS)
+    """Return the current dropdown options for tags."""
+    return jsonify(_merged_tag_options())
+
+
+@app.route('/api/tags/options', methods=['POST'])
+@admin_required
+def api_add_tag_option():
+    """Add a new value to an editable tag dropdown (admin only)."""
+    data = request.get_json(silent=True) or {}
+    kind = (data.get('kind') or '').strip()
+    value = (data.get('value') or '').strip()
+    if kind not in TAG_OPTIONS:
+        return jsonify({'error': 'Unknown option list'}), 400
+    if not value or len(value) > 60:
+        return jsonify({'error': 'Value must be between 1 and 60 characters'}), 400
+
+    options = _get_app_setting('tag_options', {})
+    values = options.setdefault(kind, [])
+    exists = any(
+        str(existing).casefold() == value.casefold()
+        for existing in _merged_tag_options()[kind]
+    )
+    if not exists:
+        values.append(value)
+        _set_app_setting('tag_options', options)
+    return jsonify(_merged_tag_options())
 
 
 def _llm_complete(prompt: str) -> str:
@@ -3095,18 +3123,40 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 2px rgba(59,130,246,0.3
           ></button>
           <template x-if="editingTags">
             <div class="mt-2 space-y-2">
-              <select x-model="tagEditIndustry" class="w-full bg-white/[0.04] border border-white/[0.08] text-gray-100 rounded-lg px-2 py-1.5 text-sm">
-                <option value="">Select Industry</option>
-                <template x-for="ind in tagOptions.industries" :key="ind">
-                  <option :value="ind" x-text="ind"></option>
-                </template>
-              </select>
-              <select x-model="tagEditSource" class="w-full bg-white/[0.04] border border-white/[0.08] text-gray-100 rounded-lg px-2 py-1.5 text-sm">
-                <option value="">Select Lead Source</option>
-                <template x-for="src in tagOptions.lead_sources" :key="src">
-                  <option :value="src" x-text="src"></option>
-                </template>
-              </select>
+              <template x-if="currentUser.role === 'admin'">
+                <div>
+                  <input type="text" list="industry-options-edit" x-model="tagEditIndustry" placeholder="Select or type an industry"
+                    class="w-full bg-white/[0.04] border border-white/[0.08] text-gray-100 rounded-lg px-2 py-1.5 text-sm placeholder-gray-600">
+                  <datalist id="industry-options-edit">
+                    <template x-for="ind in tagOptions.industries" :key="ind"><option :value="ind"></option></template>
+                  </datalist>
+                </div>
+              </template>
+              <template x-if="currentUser.role !== 'admin'">
+                <select x-model="tagEditIndustry" class="w-full bg-white/[0.04] border border-white/[0.08] text-gray-100 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">Select Industry</option>
+                  <template x-for="ind in tagOptions.industries" :key="ind">
+                    <option :value="ind" x-text="ind"></option>
+                  </template>
+                </select>
+              </template>
+              <template x-if="currentUser.role === 'admin'">
+                <div>
+                  <input type="text" list="lead-source-options-edit" x-model="tagEditSource" placeholder="Select or type a lead source"
+                    class="w-full bg-white/[0.04] border border-white/[0.08] text-gray-100 rounded-lg px-2 py-1.5 text-sm placeholder-gray-600">
+                  <datalist id="lead-source-options-edit">
+                    <template x-for="src in tagOptions.lead_sources" :key="src"><option :value="src"></option></template>
+                  </datalist>
+                </div>
+              </template>
+              <template x-if="currentUser.role !== 'admin'">
+                <select x-model="tagEditSource" class="w-full bg-white/[0.04] border border-white/[0.08] text-gray-100 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">Select Lead Source</option>
+                  <template x-for="src in tagOptions.lead_sources" :key="src">
+                    <option :value="src" x-text="src"></option>
+                  </template>
+                </select>
+              </template>
               <input type="text" x-model="tagEditCustom" placeholder="Custom tags (comma-separated)"
                 class="w-full bg-white/[0.04] border border-white/[0.08] text-gray-100 rounded-lg px-2 py-1.5 text-sm placeholder-gray-600">
               <button
@@ -3339,21 +3389,43 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 2px rgba(59,130,246,0.3
       </div>
       <div>
         <label class="block text-xs text-gray-400 mb-1">Industry</label>
-        <select x-model="newLead.industry" class="w-full bg-gray-800 border border-gray-700 text-gray-100 rounded-md px-3 py-2 text-sm">
-          <option value="">Select Industry</option>
-          <template x-for="ind in tagOptions.industries" :key="ind">
-            <option :value="ind" x-text="ind"></option>
-          </template>
-        </select>
+        <template x-if="currentUser.role === 'admin'">
+          <div>
+            <input type="text" list="industry-options-add" x-model="newLead.industry" placeholder="Select or type an industry"
+              class="w-full bg-gray-800 border border-gray-700 text-gray-100 rounded-md px-3 py-2 text-sm placeholder-gray-600">
+            <datalist id="industry-options-add">
+              <template x-for="ind in tagOptions.industries" :key="ind"><option :value="ind"></option></template>
+            </datalist>
+          </div>
+        </template>
+        <template x-if="currentUser.role !== 'admin'">
+          <select x-model="newLead.industry" class="w-full bg-gray-800 border border-gray-700 text-gray-100 rounded-md px-3 py-2 text-sm">
+            <option value="">Select Industry</option>
+            <template x-for="ind in tagOptions.industries" :key="ind">
+              <option :value="ind" x-text="ind"></option>
+            </template>
+          </select>
+        </template>
       </div>
       <div>
         <label class="block text-xs text-gray-400 mb-1">Lead Source</label>
-        <select x-model="newLead.lead_source_tag" class="w-full bg-gray-800 border border-gray-700 text-gray-100 rounded-md px-3 py-2 text-sm">
-          <option value="">Select Source</option>
-          <template x-for="src in tagOptions.lead_sources" :key="src">
-            <option :value="src" x-text="src"></option>
-          </template>
-        </select>
+        <template x-if="currentUser.role === 'admin'">
+          <div>
+            <input type="text" list="lead-source-options-add" x-model="newLead.lead_source_tag" placeholder="Select or type a lead source"
+              class="w-full bg-gray-800 border border-gray-700 text-gray-100 rounded-md px-3 py-2 text-sm placeholder-gray-600">
+            <datalist id="lead-source-options-add">
+              <template x-for="src in tagOptions.lead_sources" :key="src"><option :value="src"></option></template>
+            </datalist>
+          </div>
+        </template>
+        <template x-if="currentUser.role !== 'admin'">
+          <select x-model="newLead.lead_source_tag" class="w-full bg-gray-800 border border-gray-700 text-gray-100 rounded-md px-3 py-2 text-sm">
+            <option value="">Select Source</option>
+            <template x-for="src in tagOptions.lead_sources" :key="src">
+              <option :value="src" x-text="src"></option>
+            </template>
+          </select>
+        </template>
       </div>
       <div>
         <label class="block text-xs text-gray-400 mb-1">Custom Tags (comma-separated)</label>
@@ -3699,6 +3771,23 @@ function dashboard() {
       } catch (e) { console.error('kanbanLabel', e); }
     },
 
+    async ensureTagOption(kind, value) {
+      value = (value || '').trim();
+      if (!value || this.currentUser.role !== 'admin') return;
+      const exists = (this.tagOptions[kind] || []).some(
+        option => String(option).toLowerCase() === value.toLowerCase()
+      );
+      if (exists) return;
+      try {
+        const r = await fetch('/api/tags/options', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: kind, value: value }),
+        });
+        if (r.ok) this.tagOptions = await r.json();
+      } catch (e) { console.error('tagOption', e); }
+    },
+
     async fetchReports() {
       try {
         const [funnelR, sourceR, timeR, valueR] = await Promise.all([
@@ -3783,6 +3872,8 @@ function dashboard() {
 
     async submitNewLead() {
       this.addLeadError = '';
+      await this.ensureTagOption('industries', this.newLead.industry);
+      await this.ensureTagOption('lead_sources', this.newLead.lead_source_tag);
       try {
         const r = await fetch('/api/lead', {
           method: 'POST',
@@ -3802,6 +3893,8 @@ function dashboard() {
     async saveTags() {
       if (!this.detail) return;
       const customArr = this.tagEditCustom.split(',').map(t => t.trim()).filter(Boolean);
+      await this.ensureTagOption('industries', this.tagEditIndustry);
+      await this.ensureTagOption('lead_sources', this.tagEditSource);
       try {
         const r = await fetch('/api/lead/' + encodeURIComponent(this.detail.lead_id) + '/tags', {
           method: 'PATCH',

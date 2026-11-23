@@ -181,3 +181,35 @@ def test_csv_export_adds_tag_columns(client) -> None:
     assert row["Lead Source"] == "Website"
     assert row["Tags"] == "VIP"
     assert row["lead_source"] == "manual"
+
+
+def test_admin_can_add_tag_options(client) -> None:
+    import dashboard
+
+    assert client.get("/api/tags/options").get_json() == {
+        "industries": [],
+        "lead_sources": [],
+    }
+
+    response = client.post(
+        "/api/tags/options", json={"kind": "industries", "value": "Aerospace"}
+    )
+    assert response.status_code == 200
+    assert "Aerospace" in client.get("/api/tags/options").get_json()["industries"]
+
+    assert client.post(
+        "/api/users",
+        json={
+            "username": "viewer",
+            "password": "viewer-pass",
+            "display_name": "Viewer",
+            "role": "user",
+        },
+    ).status_code == 201
+    viewer = dashboard.app.test_client()
+    assert viewer.post(
+        "/login", data={"username": "viewer", "password": "viewer-pass"}
+    ).status_code in (200, 302)
+    assert viewer.post(
+        "/api/tags/options", json={"kind": "industries", "value": "Retail"}
+    ).status_code == 403
